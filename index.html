@@ -1143,11 +1143,26 @@ function htmlToWml(html) {
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '');
   const doc = new DOMParser().parseFromString(cleaned, 'text/html');
-  // 移除 head，只處理 body
+  // body 直接子層：累積 inline 內容，遇到 block 就先輸出累積的 inline 為段落
+  const BLOCK_TAGS = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
   let wml = '';
+  let inlineBuffer = '';
+  const flushInline = () => {
+    if (inlineBuffer && inlineBuffer.trim()) {
+      wml += '<w:p><w:pPr><w:spacing w:after="120" w:line="320" w:lineRule="auto"/></w:pPr>' + inlineBuffer + '</w:p>';
+    }
+    inlineBuffer = '';
+  };
   for (const node of Array.from(doc.body.childNodes)) {
-    wml += nodeToWml(node, {});
+    const isBlock = node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.includes(node.tagName.toLowerCase());
+    if (isBlock) {
+      flushInline();
+      wml += nodeToWml(node, {});
+    } else {
+      inlineBuffer += nodeToWml(node, {});
+    }
   }
+  flushInline();
   return wml;
 }
 
@@ -1214,7 +1229,6 @@ function blockToWml(node, ctx, tag) {
   const cls = (node.getAttribute('class') || '').toLowerCase();
   const style = node.getAttribute('style') || '';
   let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(style);
-  let pPr = '';
 
   // 對齊
   const align = (style.match(/text-align\s*:\s*(left|center|right|justify)/i) || [])[1];
@@ -1233,35 +1247,48 @@ function blockToWml(node, ctx, tag) {
   let spacing = '';
   if (heading) {
     spacing = '<w:spacing w:before="160" w:after="80"/>';
-  } else if (tag === 'p') {
+  } else {
     spacing = '<w:spacing w:after="120" w:line="320" w:lineRule="auto"/>';
   }
 
-  pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + spacing + sz + '</w:pPr>';
-
+  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + spacing + sz + '</w:pPr>';
   const childCtx = heading ? Object.assign({}, ctx, { bold: true }) : ctx;
 
-  // 收集子節點 runs（可能含 display math 切分標記）
-  let runs = '';
+  // 分離 inline 與 block 子節點，避免 <w:p> 嵌套
+  const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
+  const segments = []; // {type:'inline'|'block', content}
+  let curInline = '';
   for (const child of Array.from(node.childNodes)) {
-    runs += nodeToWml(child, childCtx);
-  }
-
-  // 切分 display math（標記 \u0001DMATH\u0001 ... \u0001ENDDMATH\u0001）
-  const parts = runs.split(/\u0001DMATH\u0001([\s\S]*?)\u0001ENDDMATH\u0001/);
-  let result = '';
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) {
-      const textRuns = parts[i];
-      if (textRuns && textRuns.trim()) {
-        result += '<w:p>' + pPr + textRuns + '</w:p>';
-      } else if (i === 0 && parts.length === 1) {
-        // 純空段落
-        result += '<w:p>' + pPr + '</w:p>';
-      }
+    const isBlockChild = child.nodeType === Node.ELEMENT_NODE && BLOCK_CHILDREN.includes(child.tagName.toLowerCase());
+    if (isBlockChild) {
+      if (curInline) { segments.push({type:'inline', content: curInline}); curInline = ''; }
+      segments.push({type:'block', content: nodeToWml(child, childCtx)});
     } else {
-      // display math - 獨立置中段落
-      result += '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120"/></w:pPr>' + parts[i] + '</w:p>';
+      curInline += nodeToWml(child, childCtx);
+    }
+  }
+  if (curInline) segments.push({type:'inline', content: curInline});
+
+  let result = '';
+  for (const seg of segments) {
+    if (seg.type === 'block') {
+      result += seg.content;
+      continue;
+    }
+    // inline：切分 display math
+    const parts = seg.content.split(/\u0001DMATH\u0001([\s\S]*?)\u0001ENDDMATH\u0001/);
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 0) {
+        const textRuns = parts[i];
+        // 只含 XML 標籤與空白時視為空
+        const textOnly = textRuns.replace(/<[^>]+>/g, '').trim();
+        if (textOnly) {
+          result += '<w:p>' + pPr + textRuns + '</w:p>';
+        }
+      } else {
+        // display math - 獨立置中段落
+        result += '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120"/></w:pPr>' + parts[i] + '</w:p>';
+      }
     }
   }
   if (!result) result = '<w:p>' + pPr + '</w:p>';
@@ -1316,7 +1343,7 @@ function makeTextRun(text, ctx) {
     const segs = text.split('\n');
     let out = '';
     for (let i = 0; i < segs.length; i++) {
-      if (i > 0) out += '<w:r/><w:r><w:br/></w:r>';
+      if (i > 0) out += '<w:r>' + rPr + '<w:br/></w:r>';
       if (segs[i]) out += '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(segs[i]) + '</w:t></w:r>';
     }
     return out;
