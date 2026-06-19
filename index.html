@@ -1061,21 +1061,28 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     preview.innerHTML = '';
     preview.appendChild(iframe);
     const idoc = iframe.contentDocument;
-    idoc.open();
-    idoc.write(htmlContent);
-    idoc.close();
+
     // 數學類科目才注入 MathJax 渲染 LaTeX 公式
     const isMathSubjectNow = MATH_SUBJECTS.includes(subject);
+    let previewHtml = htmlContent;
     if (isMathSubjectNow) {
-      try {
-        const cfg = idoc.createElement('script');
-        cfg.text = 'window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" } };';
-        idoc.head.appendChild(cfg);
-        const mj = idoc.createElement('script');
-        mj.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js';
-        idoc.head.appendChild(mj);
-      } catch(e) { console.warn('預覽 MathJax 注入失敗', e); }
+      // 把 MathJax config 與腳本注入到 HTML 字串中（在 </head> 前），
+      // 確保 MathJax 在文件解析時就能讀到 config 並自動排版
+      const mathjaxSnippet =
+        '<script>window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" }, startup: { typeset: true } };<\/script>' +
+        '<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"><\/script>';
+      if (/<\/head>/i.test(previewHtml)) {
+        previewHtml = previewHtml.replace(/<\/head>/i, mathjaxSnippet + '</head>');
+      } else if (/<body[^>]*>/i.test(previewHtml)) {
+        previewHtml = previewHtml.replace(/<body[^>]*>/i, m => m + mathjaxSnippet);
+      } else {
+        previewHtml = mathjaxSnippet + previewHtml;
+      }
     }
+
+    idoc.open();
+    idoc.write(previewHtml);
+    idoc.close();
 
     log(isMathSubjectNow
       ? '✅ 完成！點擊「下載文件」即可生成含 Word 原生方程式的 DOCX'
@@ -1486,7 +1493,12 @@ function blockToWml(node, ctx, tag) {
     tabs = '<w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs>';
   }
 
-  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + tabs + spacing + shd + pBdr + runSz + headingColor + '</w:pPr>';
+  // run-level 屬性（sz、color）必須包在 <w:rPr> 內置於 <w:pPr>，否則 Word 拒絕開啟
+  let pPrRpr = '';
+  if (runSz || headingColor) {
+    pPrRpr = '<w:rPr>' + runSz + headingColor + '</w:rPr>';
+  }
+  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + tabs + spacing + shd + pBdr + pPrRpr + '</w:pPr>';
 
   // 分離 inline 與 block 子節點
   const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
