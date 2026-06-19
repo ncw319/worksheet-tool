@@ -919,6 +919,26 @@ async function generateWorksheet() {
     setProgress(35);
 
     // 建立 prompt
+    const isMathSubject = MATH_SUBJECTS.includes(subject);
+    const mathPromptBlock = isMathSubject ? `
+【數學公式格式 — 非常重要】
+8. 所有數學公式、化學方程式、物理符號必須使用 LaTeX 語法：
+   - 行內公式用單一美元符號包圍：$x^2 + y^2 = r^2$、$\\frac{a}{b}$、$\\sqrt{2}$
+   - 獨立顯示公式用雙美元符號包圍：
+     $$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$
+   - 常見用法：上下標 $x^{n}$、$a_{i}$；分式 $\\frac{分子}{分母}$；根號 $\\sqrt[n]{x}$；希臘字母 $\\alpha \\beta \\gamma \\pi \\theta$；不等號 $\\leq \\geq \\neq$；求和 $\\sum_{i=1}^{n}$；極限 $\\lim_{x \\to 0}$；矩陣 $\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}$
+   - 單位、變數、簡單符號也用 LaTeX：$\\text{m/s}$、$v = u + at$、$\\Delta E = mc^2$
+9. 不要用 Unicode 數學符號（如 ² ³ √ ∫ ∑）替代 LaTeX；不要用 OMML 或 MathML
+10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫` : `
+【符號與公式格式】
+8. 直接使用 Unicode 符號書寫，不要使用 LaTeX、不要用 $...$ 包圍：
+   - 上標用 Unicode：x²、x³、xⁿ（或用 HTML <sup> 標籤）
+   - 下標用 Unicode 或 HTML <sub>：H₂O、aᵢ
+   - 數學符號直接用：√、±、≤、≥、≠、×、÷、°、π、∞
+   - 分式用「a/b」或「a÷b」表示，不要用 LaTeX \\frac
+9. 簡單符號直接寫，複雜公式盡量用文字描述或直式排版
+10. 嚴禁使用 $...$ 或 $$...$$ 符號包圍任何內容`;
+
     const systemPrompt = `你是香港教育工作者聯會黃楚標中學的資深教師助理，專責協助老師製作高質素的中學工作紙。請根據老師提供的資料，生成符合香港中學課程的工作紙。
 
 要求：
@@ -929,16 +949,7 @@ async function generateWorksheet() {
 5. 輸出格式為純 HTML（包含適當的 <style> 美化），不要使用 markdown
 6. HTML 應包含：學校標題、工作紙資訊區、題目區、答案區（用 page-break-before:always 分頁）
 7. 使用適合列印的版面（A4，正體字）
-
-【數學公式格式 — 非常重要】
-8. 所有數學公式、化學方程式、物理符號必須使用 LaTeX 語法：
-   - 行內公式用單一美元符號包圍：$x^2 + y^2 = r^2$、$\\frac{a}{b}$、$\\sqrt{2}$
-   - 獨立顯示公式用雙美元符號包圍：
-     $$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$
-   - 常見用法：上下標 $x^{n}$、$a_{i}$；分式 $\\frac{分子}{分母}$；根號 $\\sqrt[n]{x}$；希臘字母 $\\alpha \\beta \\gamma \\pi \\theta$；不等號 $\\leq \\geq \\neq$；求和 $\\sum_{i=1}^{n}$；極限 $\\lim_{x \\to 0}$；矩陣 $\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}$
-   - 單位、變數、簡單符號也用 LaTeX：$\\text{m/s}$、$v = u + at$、$\\Delta E = mc^2$
-9. 不要用 Unicode 數學符號（如 ² ³ √ ∫ ∑）替代 LaTeX；不要用 OMML 或 MathML
-10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫
+${mathPromptBlock}
 11. 嚴禁在 HTML 中引用任何外部 JavaScript 函式庫或 CDN（包括但不限於 polyfill.io、cdn.jsdelivr.net、unpkg.com、cdnjs 等）；所有 <script> 標籤一律不要輸出，公式渲染由系統自動處理
 12. 嚴禁使用 <iframe>、<object>、<embed> 等嵌入標籤，嚴禁使用 on* 事件處理器（onclick、onload 等）`;
 
@@ -1051,17 +1062,22 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     idoc.open();
     idoc.write(htmlContent);
     idoc.close();
-    // 注入 MathJax 渲染 LaTeX 公式
-    try {
-      const cfg = idoc.createElement('script');
-      cfg.text = 'window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" } };';
-      idoc.head.appendChild(cfg);
-      const mj = idoc.createElement('script');
-      mj.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js';
-      idoc.head.appendChild(mj);
-    } catch(e) { console.warn('預覽 MathJax 注入失敗', e); }
+    // 數學類科目才注入 MathJax 渲染 LaTeX 公式
+    const isMathSubjectNow = MATH_SUBJECTS.includes(subject);
+    if (isMathSubjectNow) {
+      try {
+        const cfg = idoc.createElement('script');
+        cfg.text = 'window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" } };';
+        idoc.head.appendChild(cfg);
+        const mj = idoc.createElement('script');
+        mj.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js';
+        idoc.head.appendChild(mj);
+      } catch(e) { console.warn('預覽 MathJax 注入失敗', e); }
+    }
 
-    log('✅ 完成！點擊「下載文件」即可生成含 Word 原生方程式的 DOCX', 'success');
+    log(isMathSubjectNow
+      ? '✅ 完成！點擊「下載文件」即可生成含 Word 原生方程式的 DOCX'
+      : '✅ 完成！點擊「下載文件」即可生成 DOCX', 'success');
     setProgress(100);
     document.getElementById('downloadButtons').style.display = 'flex';
 
@@ -1085,10 +1101,19 @@ function downloadOutput() {
 
 async function downloadDocx(filename) {
   try {
-    log('⚙️ 正在轉換為 Word 格式（LaTeX → 原生方程式 OMML）...', 'step');
+    // 依當前科目決定是否啟用 LaTeX→OMML 公式轉換
+    const subject = document.getElementById('subject').value;
+    MATH_SUBJECT_ACTIVE = MATH_SUBJECTS.includes(subject);
+    if (MATH_SUBJECT_ACTIVE) {
+      log('⚙️ 正在轉換為 Word 格式（LaTeX → 原生方程式 OMML）...', 'step');
+    } else {
+      log('⚙️ 正在轉換為 Word 格式（純文字模式，不轉公式）...', 'step');
+    }
     const blob = await buildDocxBlob(generatedContent);
     saveAs(blob, filename + '.docx');
-    log('💾 已下載 DOCX 文件（含 Word 原生方程式，可點擊編輯）', 'success');
+    log(MATH_SUBJECT_ACTIVE
+      ? '💾 已下載 DOCX 文件（含 Word 原生方程式，可點擊編輯）'
+      : '💾 已下載 DOCX 文件', 'success');
   } catch (err) {
     log('❌ DOCX 下載失敗: ' + err.message, 'error');
     console.error(err);
@@ -1142,6 +1167,9 @@ async function buildDocxBlob(html) {
 // ============ HTML → WordprocessingML 轉換（含 CSS 樣式解析）============
 // 全域 CSS 樣式表（從 <style> 解析）
 let GLOBAL_CSS_MAP = {};
+// 是否啟用 LaTeX→OMML 公式轉換（僅數學類科目）
+let MATH_SUBJECT_ACTIVE = false;
+const MATH_SUBJECTS = ['數學', '數學（延伸部分 – 單元二）', '物理', '化學'];
 
 function parseStylesheet(html) {
   const map = {};
@@ -1503,9 +1531,12 @@ function answerSpaceToWml(cssProps) {
 
 function textToWmlRuns(text, ctx) {
   if (!text) return '';
+  // 非數學類科目：不轉換公式，$...$ 直接當普通文字輸出（保留原貌含 $ 符號）
+  if (!MATH_SUBJECT_ACTIVE) {
+    return makeTextRun(text, ctx);
+  }
   const runs = [];
   // 匹配 $$...$$ 或 $...$，但跳過 \$ 跳脫
-  // 先把 \$ 暫存為佔位符，避免干擾配對
   const placeholders = [];
   let work = text.replace(/\\\$/g, () => {
     placeholders.push('$');
