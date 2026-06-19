@@ -1129,56 +1129,698 @@ async function downloadDocx(filename) {
   }
 }
 
+// ============ DOCX 生成（使用 docx.js API，自動產生結構正確的 OOXML）============
+// 全域 CSS 樣式表（從 <style> 解析）
+let GLOBAL_CSS_MAP = {};
+// 是否啟用 LaTeX→OMML 公式轉換（僅數學類科目）
+let MATH_SUBJECT_ACTIVE = false;
+const MATH_SUBJECTS = ['數學', '數學（延伸部分 – 單元二）', '物理', '化學'];
+
+// docx.js 别名（庫載入後存在全域 docx）
+const D = () => (typeof docx !== 'undefined') ? docx : (typeof window !== 'undefined' ? window.docx : null);
+
 async function buildDocxBlob(html) {
-  if (typeof JSZip === 'undefined') {
-    throw new Error('JSZip 未載入，請確認網絡連線後重新開啟此工具');
+  const lib = D();
+  if (!lib) {
+    throw new Error('docx 函式庫未載入，請確認網絡連線後重新開啟此工具');
   }
   if (typeof temml === 'undefined') {
     log('⚠️ temml 函式庫未載入，公式將以純文字顯示', 'thinking');
   }
 
   log('📄 解析 HTML 結構...', 'info');
-  const bodyWml = htmlToWml(html);
+  const children = htmlToDocxChildren(html);
   log('🔢 轉換 LaTeX 公式為 Word 原生方程式 (OMML)...', 'info');
 
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
-    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
-    `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ` +
-    `xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">` +
-    `<w:body>${bodyWml}` +
-    `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
-    `<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>` +
-    `<w:cols w:space="720"/><w:docGrid w:linePitch="360"/></w:sectPr>` +
-    `</w:body></w:document>`;
+  const { Document, Packer } = lib;
+  const doc = new Document({
+    creator: '黃楚標中學 AI 工作紙生成工具',
+    title: '工作紙',
+    styles: {
+      default: {
+        document: {
+          run: { font: 'Microsoft JhengHei', size: 21 },
+        },
+      },
+    },
+    sections: [{
+      properties: {
+        page: {
+          size: { width: 11906, height: 16838 }, // A4
+          margin: { top: 1134, right: 1134, bottom: 1134, left: 1134 },
+        },
+      },
+      children: children,
+    }],
+  });
 
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml',
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
-    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
-    `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
-    `<Default Extension="xml" ContentType="application/xml"/>` +
-    `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
-    `</Types>`);
-  zip.folder('_rels').file('.rels',
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
-    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-    `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
-    `</Relationships>`);
-  zip.folder('word').file('document.xml', documentXml);
+  return await Packer.toBlob(doc);
+}
 
-  return await zip.generateAsync({
-    type: 'blob',
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    compression: 'DEFLATE'
+// HTML → docx.js Paragraph/Table 陣列
+function htmlToDocxChildren(html) {
+  const raw = String(html || '')
+    .replace(/```html\s*/gi, '')
+    .replace(/```/g, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '');
+  GLOBAL_CSS_MAP = parseStylesheet(raw);
+  const cleaned = raw.replace(/<style[\s\S]*?<\/style>/gi, '');
+  const doc = new DOMParser().parseFromString(cleaned, 'text/html');
+  const lib = D();
+  const { Paragraph, TextRun, Table } = lib;
+  const children = [];
+  // 顶層行內 runs 緩衝：遇到區塊元素就 flush 成段落
+  let inlineBuffer = [];
+  const flushInline = () => {
+    if (inlineBuffer.length) {
+      children.push(new Paragraph({ children: inlineBuffer }));
+      inlineBuffer = [];
+    }
+  };
+  for (const node of Array.from(doc.body.childNodes)) {
+    // 純空白文字節點或 br：跳過（避免產生裸 run）
+    if (node.nodeType === Node.TEXT_NODE) {
+      const txt = node.textContent;
+      if (!txt || !txt.trim()) continue;
+      // 有內容的文字：加入 buffer
+      const runs = textToDocxRuns(txt, {});
+      if (Array.isArray(runs)) {
+        for (const r of runs) { if (r) inlineBuffer.push(r); }
+      } else if (runs) {
+        inlineBuffer.push(runs);
+      }
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = node.tagName.toLowerCase();
+    // br 在頂層：flush 當前 buffer（等同換段）
+    if (tag === 'br') {
+      flushInline();
+      continue;
+    }
+    const items = nodeToDocx(node, {});
+    if (Array.isArray(items)) {
+      // 判斷是行內 runs 還是區塊陣列
+      const hasBlock = items.some(it => it instanceof Paragraph || it instanceof Table);
+      if (hasBlock) {
+        flushInline();
+        for (const it of items) { if (it) children.push(it); }
+      } else {
+        for (const it of items) { if (it) inlineBuffer.push(it); }
+      }
+    } else if (items) {
+      if (items instanceof Paragraph || items instanceof Table) {
+        flushInline();
+        children.push(items);
+      } else {
+        inlineBuffer.push(items);
+      }
+    }
+  }
+  flushInline();
+  if (children.length === 0) {
+    children.push(new Paragraph({ children: [] }));
+  }
+  return children;
+}
+
+// 節點 → docx.js 元素（Paragraph、Table 或陣列）
+function nodeToDocx(node, ctx) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return textToDocxRuns(node.textContent, ctx);
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+  const tag = node.tagName.toLowerCase();
+  const lib = D();
+
+  if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'blockquote'].includes(tag)) {
+    return blockToDocxParagraph(node, ctx, tag);
+  }
+  if (tag === 'pre' || (tag === 'div' && /code-block|code\b/i.test(node.getAttribute('class') || ''))) {
+    return codeBlockToDocx(node, ctx);
+  }
+  if (tag === 'br') {
+    return null;
+  }
+  if (tag === 'hr') {
+    return new lib.Paragraph({
+      border: { bottom: { style: lib.BorderStyle.SINGLE, size: 6, color: '999999', space: 1 } },
+      spacing: { before: 120, after: 120 },
+    });
+  }
+  if (tag === 'table') {
+    return tableToDocx(node, ctx);
+  }
+  if (tag === 'ul' || tag === 'ol') {
+    return listToDocx(node, ctx, tag);
+  }
+  if (['span', 'b', 'strong', 'i', 'em', 'u', 'sub', 'sup', 'a', 'code', 'mark', 'small', 'font'].includes(tag)) {
+    return inlineElementToDocxRuns(node, ctx);
+  }
+  return nodeToDocxChildrenArray(node, ctx);
+}
+
+function nodeToDocxChildrenArray(node, ctx) {
+  const runs = [];
+  for (const child of Array.from(node.childNodes)) {
+    const items = nodeToDocx(child, ctx);
+    if (Array.isArray(items)) {
+      for (const it of items) {
+        if (it) runs.push(it);
+      }
+    } else if (items) {
+      runs.push(items);
+    }
+  }
+  return runs;
+}
+
+// 區塊 → Paragraph 陣列
+function blockToDocxParagraph(node, ctx, tag) {
+  const lib = D();
+  const cssProps = resolveStyle(node);
+  const { Paragraph, TextRun, AlignmentType, BorderStyle, ShadingType } = lib;
+
+  const paraOpts = { children: [] };
+
+  const align = cssProps['text-align'];
+  if (align === 'center') paraOpts.alignment = AlignmentType.CENTER;
+  else if (align === 'right') paraOpts.alignment = AlignmentType.RIGHT;
+  else if (align === 'justify') paraOpts.alignment = AlignmentType.JUSTIFIED;
+
+  let indent = {};
+  if (cssProps['margin-left']) {
+    const tw = cssLenToTwip(cssProps['margin-left']);
+    if (tw) indent.left = tw;
+  }
+  if (cssProps['padding-left'] && !indent.left) {
+    const tw = cssLenToTwip(cssProps['padding-left']);
+    if (tw) indent.left = tw;
+  }
+  if (cssProps['margin-right']) {
+    const tw = cssLenToTwip(cssProps['margin-right']);
+    if (tw) indent.right = tw;
+  }
+  if (Object.keys(indent).length) paraOpts.indent = indent;
+
+  let spacing = { after: 120, line: 320, lineRule: 'auto' };
+  if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
+    spacing = { before: 160, after: 80 };
+  }
+  if (cssProps['margin-bottom']) {
+    const tw = cssLenToTwip(cssProps['margin-bottom']);
+    if (tw) { spacing.after = tw; spacing.line = 320; spacing.lineRule = 'auto'; }
+  }
+  if (cssProps['margin-top']) {
+    const tw = cssLenToTwip(cssProps['margin-top']);
+    if (tw) { spacing.before = tw; }
+  }
+  paraOpts.spacing = spacing;
+
+  if (cssProps['background-color']) {
+    const hex = cssColorToHex(cssProps['background-color']);
+    if (hex) paraOpts.shading = { type: ShadingType.CLEAR, fill: hex };
+  }
+
+  if (cssProps['border-left']) {
+    const m = cssProps['border-left'].match(/(\d+)\s*px\s*(?:solid|dashed|double)?\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
+    if (m) {
+      const sz = Math.max(4, Math.round(parseInt(m[1], 10) * 8));
+      const col = cssColorToHex(m[2]) || '000000';
+      paraOpts.border = { left: { style: BorderStyle.SINGLE, size: sz, color: col, space: 4 } };
+    }
+  }
+  if (cssProps['border'] && /solid/i.test(cssProps['border'])) {
+    const m = cssProps['border'].match(/(\d+)\s*px\s*solid\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
+    if (m) {
+      const sz = Math.max(4, Math.round(parseInt(m[1], 10) * 8));
+      const col = cssColorToHex(m[2]) || '000000';
+      paraOpts.border = {
+        top: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
+        left: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
+        bottom: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
+        right: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
+      };
+    }
+  }
+
+  const cls = (node.getAttribute('class') || '').toLowerCase();
+  if (/page-break|pagebreak/.test(cls) || /page-break-before:\s*always/i.test(node.getAttribute('style') || '')) {
+    paraOpts.pageBreakBefore = true;
+  }
+
+  let childCtx = Object.assign({}, ctx);
+  if (tag === 'h1') { childCtx.fontSize = 36; childCtx.bold = true; }
+  else if (tag === 'h2') { childCtx.fontSize = 30; childCtx.bold = true; }
+  else if (tag === 'h3') { childCtx.fontSize = 26; childCtx.bold = true; }
+  else if (tag === 'h4') { childCtx.fontSize = 24; childCtx.bold = true; }
+  else if (tag === 'h5' || tag === 'h6') { childCtx.fontSize = 22; childCtx.bold = true; }
+
+  if (cssProps['font-size']) {
+    const hp = cssSizeToHalfPt(cssProps['font-size']);
+    if (hp) childCtx.fontSize = hp;
+  }
+  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) {
+    childCtx.bold = true;
+  }
+  if (cssProps['color']) {
+    const hex = cssColorToHex(cssProps['color']);
+    if (hex) childCtx.color = hex;
+  }
+  if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) {
+    childCtx.italic = true;
+  }
+
+  const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
+  const inlineRuns = [];
+  const subBlocks = [];
+  for (const child of Array.from(node.childNodes)) {
+    const isBlockChild = child.nodeType === Node.ELEMENT_NODE && BLOCK_CHILDREN.includes(child.tagName.toLowerCase());
+    if (isBlockChild) {
+      subBlocks.push(child);
+    } else {
+      const runs = nodeToDocx(child, childCtx);
+      if (Array.isArray(runs)) {
+        for (const r of runs) { if (r) inlineRuns.push(r); }
+      } else if (runs) {
+        inlineRuns.push(runs);
+      }
+    }
+  }
+
+  const paragraphs = [];
+  if (inlineRuns.length) {
+    const segs = splitDisplayMath(inlineRuns);
+    for (const seg of segs) {
+      if (seg.type === 'inline') {
+        paragraphs.push(new Paragraph(Object.assign({}, paraOpts, { children: seg.runs })));
+      } else {
+        paragraphs.push(new Paragraph({
+          spacing: { before: 120, after: 120 },
+          children: seg.runs,
+        }));
+      }
+    }
+  }
+  for (const sub of subBlocks) {
+    const subItems = nodeToDocx(sub, childCtx);
+    if (Array.isArray(subItems)) {
+      for (const it of subItems) { if (it) paragraphs.push(it); }
+    } else if (subItems) {
+      paragraphs.push(subItems);
+    }
+  }
+  if (paragraphs.length === 0) {
+    paragraphs.push(new Paragraph(paraOpts));
+  }
+  return paragraphs;
+}
+
+function splitDisplayMath(runs) {
+  const segs = [];
+  let cur = [];
+  for (const run of runs) {
+    if (run && run.__displayMath) {
+      if (cur.length) { segs.push({ type: 'inline', runs: cur }); cur = []; }
+      segs.push({ type: 'display', runs: [run] });
+    } else {
+      cur.push(run);
+    }
+  }
+  if (cur.length) segs.push({ type: 'inline', runs: cur });
+  return segs;
+}
+
+// 程式碼區塊 → 單格表格
+function codeBlockToDocx(node, ctx) {
+  const lib = D();
+  const { Table, TableRow, TableCell, Paragraph, TextRun, WidthType, ShadingType, BorderStyle } = lib;
+  const text = node.textContent || '';
+  const lines = text.split('\n');
+  const paragraphs = lines.map(line => new Paragraph({
+    spacing: { after: 0, line: 280, lineRule: 'exact' },
+    children: [new TextRun({ text: line || ' ', font: 'Consolas', size: 20 })],
+  }));
+  const cell = new TableCell({
+    children: paragraphs,
+    shading: { type: ShadingType.CLEAR, fill: 'F5F5F5' },
+    margins: { top: 100, bottom: 100, left: 120, right: 120 },
+  });
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: {
+      top: { style: BorderStyle.SINGLE, size: 4, color: 'DDDDDD' },
+      bottom: { style: BorderStyle.SINGLE, size: 4, color: 'DDDDDD' },
+      left: { style: BorderStyle.SINGLE, size: 4, color: 'DDDDDD' },
+      right: { style: BorderStyle.SINGLE, size: 4, color: 'DDDDDD' },
+    },
+    rows: [new TableRow({ children: [cell] })],
   });
 }
 
-// ============ HTML → WordprocessingML 轉換（含 CSS 樣式解析）============
-// 全域 CSS 樣式表（從 <style> 解析）
-let GLOBAL_CSS_MAP = {};
-// 是否啟用 LaTeX→OMML 公式轉換（僅數學類科目）
-let MATH_SUBJECT_ACTIVE = false;
-const MATH_SUBJECTS = ['數學', '數學（延伸部分 – 單元二）', '物理', '化學'];
+// 行內元素 → runs 陣列（套用元素自身的樣式到子 runs）
+function inlineElementToDocxRuns(node, ctx) {
+  const tag = node.tagName.toLowerCase();
+  const cssProps = resolveStyle(node);
+  const elCtx = Object.assign({}, ctx);
+  if (tag === 'b' || tag === 'strong') elCtx.bold = true;
+  if (tag === 'i' || tag === 'em') elCtx.italic = true;
+  if (tag === 'u') elCtx.underline = true;
+  if (tag === 'sub') elCtx.subscript = true;
+  if (tag === 'sup') elCtx.superscript = true;
+  if (cssProps['color']) {
+    const hex = cssColorToHex(cssProps['color']);
+    if (hex) elCtx.color = hex;
+  }
+  if (cssProps['font-size']) {
+    const hp = cssSizeToHalfPt(cssProps['font-size']);
+    if (hp) elCtx.fontSize = hp;
+  }
+  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) elCtx.bold = true;
+  if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) elCtx.italic = true;
+
+  const runs = [];
+  for (const child of Array.from(node.childNodes)) {
+    const childRuns = nodeToDocx(child, elCtx);
+    if (Array.isArray(childRuns)) {
+      for (const r of childRuns) { if (r) runs.push(r); }
+    } else if (childRuns) {
+      runs.push(childRuns);
+    }
+  }
+  return runs;
+}
+
+// 純文字 → runs（含 $...$ 公式轉換）
+function textToDocxRuns(text, ctx) {
+  if (!text) return [];
+  const lib = D();
+  const { TextRun } = lib;
+
+  if (!MATH_SUBJECT_ACTIVE) {
+    return textToDocxPlainRuns(text, ctx);
+  }
+
+  const placeholders = [];
+  let work = text.replace(/\\\$/g, () => {
+    placeholders.push('$');
+    return '\u0001DOLLAR\u0001';
+  });
+
+  const regex = /(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g;
+  const runs = [];
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(work)) !== null) {
+    if (match.index > lastIndex) {
+      const seg = restoreDollar(work.slice(lastIndex, match.index), placeholders);
+      runs.push(...textToDocxPlainRuns(seg, ctx));
+    }
+    const m = match[0];
+    if (m.startsWith('$$')) {
+      const latex = restoreDollar(m.slice(2, -2).trim(), placeholders);
+      const mathRun = latexToDocxMath(latex, true);
+      if (mathRun) {
+        mathRun.__displayMath = true;
+        runs.push(mathRun);
+      } else {
+        runs.push(...textToDocxPlainRuns('$$' + latex + '$$', ctx));
+      }
+    } else {
+      const latex = restoreDollar(m.slice(1, -1).trim(), placeholders);
+      const mathRun = latexToDocxMath(latex, false);
+      if (mathRun) {
+        runs.push(mathRun);
+      } else {
+        runs.push(...textToDocxPlainRuns('$' + latex + '$', ctx));
+      }
+    }
+    lastIndex = match.index + m.length;
+  }
+  if (lastIndex < work.length) {
+    const seg = restoreDollar(work.slice(lastIndex), placeholders);
+    runs.push(...textToDocxPlainRuns(seg, ctx));
+  }
+  return runs;
+}
+
+// 純文字（含 \n）→ TextRun 陣列
+function textToDocxPlainRuns(text, ctx) {
+  const lib = D();
+  const { TextRun } = lib;
+  if (!text) return [];
+  const opts = {};
+  if (ctx.bold) opts.bold = true;
+  if (ctx.italic) opts.italic = true;
+  if (ctx.underline) opts.underline = {};
+  if (ctx.color) opts.color = ctx.color;
+  if (ctx.fontSize) opts.size = ctx.fontSize;
+  if (ctx.subscript) opts.subscript = true;
+  if (ctx.superscript) opts.superscript = true;
+  if (text.indexOf('\n') >= 0) {
+    const segs = text.split('\n');
+    const runs = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (i > 0) runs.push(new TextRun(Object.assign({ text: '' }, opts, { break: 1 })));
+      if (segs[i]) runs.push(new TextRun(Object.assign({ text: segs[i] }, opts)));
+    }
+    return runs;
+  }
+  return [new TextRun(Object.assign({ text }, opts))];
+}
+
+// LaTeX → docx.js Math 物件
+function latexToDocxMath(latex, displayMode) {
+  try {
+    if (typeof temml === 'undefined') return null;
+    const mathmlStr = temml.renderToString(latex, { displayMode: displayMode });
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(mathmlStr, 'text/xml');
+    const mathNode = doc.documentElement;
+    const lib = D();
+    const { Math: MathX } = lib;
+    const mathChildren = convertMathmlToDocx(mathNode);
+    if (!mathChildren || mathChildren.length === 0) return null;
+    return new MathX({ children: mathChildren });
+  } catch (e) {
+    console.warn('latexToDocxMath error:', e);
+    return null;
+  }
+}
+
+// MathML 元素 → docx.js 數學物件陣列
+// 設計：convertMathmlNode(node) 處理「單一節點」，回傳陣列
+//       convertMathmlChildren(node) 遍歷子元素，回傳陣列
+function convertMathmlToDocx(node) {
+  return convertMathmlChildren(node);
+}
+
+function convertMathmlChildren(node) {
+  const result = [];
+  if (!node) return result;
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const items = convertMathmlNode(child);
+    for (const it of items) result.push(it);
+  }
+  return result;
+}
+
+function convertMathmlNode(node) {
+  const lib = D();
+  const { MathRun, MathFraction, MathSuperScript, MathSubScript, MathSubSuperScript, MathRadical, MathSum, MathRoundBrackets, MathSquareBrackets, MathCurlyBrackets, MathLimitLocation } = lib;
+  const tag = node.localName || node.tagName.toLowerCase().replace(/^m:/, '');
+  const childKids = Array.from(node.childNodes).filter(n => n.nodeType === Node.ELEMENT_NODE);
+  const text = node.textContent || '';
+
+  switch (tag) {
+    case 'math':
+    case 'mrow':
+    case 'mstyle':
+    case 'mpadded':
+      return convertMathmlChildren(node);
+    case 'mi':
+    case 'mn':
+    case 'mo':
+    case 'mtext':
+    case 'ms':
+      return text ? [new MathRun(text)] : [];
+    case 'mspace':
+      return [];
+    case 'msup':
+      if (childKids.length >= 2) {
+        return [new MathSuperScript({
+          children: convertMathmlNode(childKids[0]),
+          superScript: convertMathmlNode(childKids[1]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    case 'msub':
+      if (childKids.length >= 2) {
+        return [new MathSubScript({
+          children: convertMathmlNode(childKids[0]),
+          subScript: convertMathmlNode(childKids[1]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    case 'msubsup':
+      if (childKids.length >= 3) {
+        return [new MathSubSuperScript({
+          children: convertMathmlNode(childKids[0]),
+          subScript: convertMathmlNode(childKids[1]),
+          superScript: convertMathmlNode(childKids[2]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    case 'mfrac':
+      if (childKids.length >= 2) {
+        return [new MathFraction({
+          numerator: convertMathmlNode(childKids[0]),
+          denominator: convertMathmlNode(childKids[1]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    case 'msqrt':
+      return [new MathRadical({ children: convertMathmlChildren(node) })];
+    case 'mroot':
+      if (childKids.length >= 2) {
+        return [new MathRadical({
+          children: convertMathmlNode(childKids[0]),
+          degree: convertMathmlNode(childKids[1]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    case 'mfenced': {
+      const open = node.getAttribute('open') || '(';
+      const inner = convertMathmlChildren(node);
+      if (open === '[') {
+        return [new MathSquareBrackets({ children: inner })];
+      } else if (open === '{') {
+        return [new MathCurlyBrackets({ children: inner })];
+      }
+      return [new MathRoundBrackets({ children: inner })];
+    }
+    case 'munder':
+    case 'mover':
+    case 'munderover': {
+      const baseText = childKids[0] ? childKids[0].textContent : '';
+      if (['∑','∏','∫','⋃','⋂','∮'].includes(baseText)) {
+        const opts = { children: childKids[0] ? convertMathmlNode(childKids[0]) : [] };
+        if (tag === 'munder' && childKids[1]) opts.subScript = convertMathmlNode(childKids[1]);
+        if (tag === 'mover' && childKids[1]) opts.superScript = convertMathmlNode(childKids[1]);
+        if (tag === 'munderover') {
+          if (childKids[1]) opts.subScript = convertMathmlNode(childKids[1]);
+          if (childKids[2]) opts.superScript = convertMathmlNode(childKids[2]);
+        }
+        return [new MathSum(opts)];
+      } else if (tag === 'munder' && childKids[1]) {
+        return [new MathLimitLocation({
+          children: convertMathmlNode(childKids[0]),
+          subScript: convertMathmlNode(childKids[1]),
+        })];
+      } else if (tag === 'mover' && childKids[1]) {
+        return [new MathLimitLocation({
+          children: convertMathmlNode(childKids[0]),
+          superScript: convertMathmlNode(childKids[1]),
+        })];
+      }
+      return convertMathmlChildren(node);
+    }
+    case 'mtable': {
+      // 矩陣：簡化為逐列逐項輸出
+      const result = [];
+      for (const row of childKids) {
+        result.push(...convertMathmlChildren(row));
+      }
+      return result;
+    }
+    case 'mtr':
+    case 'mtd':
+      return convertMathmlChildren(node);
+    default:
+      return convertMathmlChildren(node);
+  }
+}
+
+// 表格 → docx.js Table
+function tableToDocx(node, ctx) {
+  const lib = D();
+  const { Table, TableRow, TableCell, Paragraph, WidthType } = lib;
+  const rows = [];
+  for (const tr of Array.from(node.querySelectorAll('tr'))) {
+    const cells = [];
+    for (const td of Array.from(tr.querySelectorAll('td, th'))) {
+      const cellChildren = [];
+      for (const child of Array.from(td.childNodes)) {
+        const items = nodeToDocx(child, ctx);
+        if (Array.isArray(items)) {
+          for (const it of items) { if (it) cellChildren.push(it); }
+        } else if (items) {
+          cellChildren.push(items);
+        }
+      }
+      if (cellChildren.length === 0) {
+        cellChildren.push(new Paragraph({}));
+      }
+      const cellOpts = { children: cellChildren };
+      const tdCss = resolveStyle(td);
+      if (tdCss['background-color']) {
+        const hex = cssColorToHex(tdCss['background-color']);
+        if (hex) cellOpts.shading = { type: lib.ShadingType.CLEAR, fill: hex };
+      }
+      cells.push(new TableCell(cellOpts));
+    }
+    if (cells.length) rows.push(new TableRow({ children: cells }));
+  }
+  if (!rows.length) return null;
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: rows,
+  });
+}
+
+// 列表 → Paragraph 陣列
+function listToDocx(node, ctx, tag) {
+  const lib = D();
+  const { Paragraph, TextRun } = lib;
+  const paragraphs = [];
+  const isOrdered = tag === 'ol';
+  let idx = 1;
+  for (const li of Array.from(node.querySelectorAll(':scope > li'))) {
+    const runs = [];
+    const prefix = isOrdered ? (idx + '. ') : '• ';
+    runs.push(new TextRun({ text: prefix, bold: true }));
+    for (const child of Array.from(li.childNodes)) {
+      const childRuns = nodeToDocx(child, ctx);
+      if (Array.isArray(childRuns)) {
+        for (const r of childRuns) { if (r) runs.push(r); }
+      } else if (childRuns) {
+        runs.push(childRuns);
+      }
+    }
+    paragraphs.push(new Paragraph({
+      spacing: { after: 60 },
+      indent: { left: 480, hanging: 360 },
+      children: runs,
+    }));
+    idx++;
+  }
+  return paragraphs;
+}
+
+function restoreDollar(s, placeholders) {
+  let i = 0;
+  return s.replace(/\u0001DOLLAR\u0001/g, () => placeholders[i++] || '$');
+}
+
+function escapeXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ============ CSS 樣式解析輔助函式（供 docx.js 轉換器使用）============
+// 全域 CSS 樣式表（從 <style> 解析）— 已在上方宣告
+// MATH_SUBJECT_ACTIVE、MATH_SUBJECTS 已在上方宣告
 
 function parseStylesheet(html) {
   const map = {};
@@ -1276,434 +1918,6 @@ function cssLenToTwip(v) {
   return Math.round(n * 20);
 }
 
-function htmlToWml(html) {
-  const raw = String(html || '')
-    .replace(/```html\s*/gi, '')
-    .replace(/```/g, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '');
-  // 先解析樣式表
-  GLOBAL_CSS_MAP = parseStylesheet(raw);
-  // 移除 <style> 後解析 DOM
-  const cleaned = raw.replace(/<style[\s\S]*?<\/style>/gi, '');
-  const doc = new DOMParser().parseFromString(cleaned, 'text/html');
-  const BLOCK_TAGS = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
-  let wml = '';
-  let inlineBuffer = '';
-  const flushInline = () => {
-    if (inlineBuffer && inlineBuffer.replace(/<[^>]+>/g,'').trim()) {
-      wml += '<w:p><w:pPr><w:spacing w:after="120" w:line="320" w:lineRule="auto"/></w:pPr>' + inlineBuffer + '</w:p>';
-    }
-    inlineBuffer = '';
-  };
-  for (const node of Array.from(doc.body.childNodes)) {
-    const isBlock = node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.includes(node.tagName.toLowerCase());
-    if (isBlock) {
-      flushInline();
-      wml += nodeToWml(node, {});
-    } else {
-      inlineBuffer += nodeToWml(node, {});
-    }
-  }
-  flushInline();
-  return wml;
-}
-
-function nodeToWml(node, ctx) {
-  if (node.nodeType === Node.TEXT_NODE) {
-    return textToWmlRuns(node.textContent, ctx);
-  }
-  if (node.nodeType !== Node.ELEMENT_NODE) return '';
-
-  const tag = node.tagName.toLowerCase();
-
-  // 區塊級元素
-  if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'blockquote'].includes(tag)) {
-    return blockToWml(node, ctx, tag);
-  }
-  // 程式碼區塊：<pre> 或 class 含 code-block / code
-  if (tag === 'pre' || (tag === 'div' && /code-block|code\b/i.test(node.getAttribute('class') || ''))) {
-    return codeBlockToWml(node, ctx);
-  }
-  if (tag === 'br') {
-    return '<w:r><w:br/></w:r>';
-  }
-  if (tag === 'hr') {
-    return '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="999999"/></w:pBdr></w:pPr></w:p>';
-  }
-  if (tag === 'table') {
-    return tableToWml(node, ctx);
-  }
-  if (['ul', 'ol'].includes(tag)) {
-    return listToWml(node, ctx, tag);
-  }
-  if (tag === 'li') {
-    return blockToWml(node, ctx, 'p');
-  }
-  if (tag === 'img') {
-    return '<w:p><w:r><w:t xml:space="preserve">[圖片]</w:t></w:r></w:p>';
-  }
-
-  // 行內元素：合併 class CSS + inline style + HTML 語意標籤
-  const newCtx = Object.assign({}, ctx);
-  const cssProps = (tag === 'span' || tag === 'font' || tag === 'a' || tag === 'b' || tag === 'i' || tag === 'em' || tag === 'strong' || tag === 'u' || tag === 's') ? resolveStyle(node) : {};
-
-  if (tag === 'b' || tag === 'strong') newCtx.bold = true;
-  if (tag === 'i' || tag === 'em') newCtx.italic = true;
-  if (tag === 'u') newCtx.underline = true;
-  if (tag === 'sub') newCtx.subscript = true;
-  if (tag === 'sup') newCtx.superscript = true;
-  if (tag === 's' || tag === 'del' || tag === 'strike') newCtx.strike = true;
-
-  // 從 CSS 屬性更新樣式
-  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) newCtx.bold = true;
-  if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) newCtx.italic = true;
-  if (cssProps['text-decoration']) {
-    if (/underline/i.test(cssProps['text-decoration'])) newCtx.underline = true;
-    if (/line-through/i.test(cssProps['text-decoration'])) newCtx.strike = true;
-  }
-  if (cssProps['color']) {
-    const hex = cssColorToHex(cssProps['color']);
-    if (hex) newCtx.color = hex;
-  }
-  if (cssProps['font-size']) {
-    const hp = cssSizeToHalfPt(cssProps['font-size']);
-    if (hp) newCtx.fontSize = hp;
-  }
-  // border-bottom → 底線（填空線）
-  if (cssProps['border-bottom'] && !/none/i.test(cssProps['border-bottom'])) {
-    newCtx.underline = true;
-  }
-
-  let result = '';
-  for (const child of Array.from(node.childNodes)) {
-    result += nodeToWml(child, newCtx);
-  }
-  return result;
-}
-
-function blockToWml(node, ctx, tag) {
-  const cls = (node.getAttribute('class') || '').toLowerCase();
-  const cssProps = resolveStyle(node);
-  let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(cssProps['page-break-before'] || '');
-
-  // 程式碼區塊：white-space: pre 或 class 含 code-block
-  if (/\bcode-block\b/.test(cls) || /\bpre\b/i.test(cssProps['white-space'] || '') || /monospace/i.test(cssProps['font-family'] || '')) {
-    return codeBlockToWml(node, ctx, cssProps);
-  }
-
-  // 處理 display:flex / inline-flex → 表格並排
-  if (/flex/i.test(cssProps['display'] || '')) {
-    return flexToTable(node, ctx, cssProps);
-  }
-
-  // 處理 answer-space / answer-space-like 空白答題區
-  const minHeight = cssProps['min-height'] || '';
-  const isEmptyBlock = !node.textContent.trim() && !node.querySelector('img,table,ul,ol');
-  if (isEmptyBlock && (cls.includes('answer-space') || (minHeight && /px|pt/i.test(minHeight)))) {
-    return answerSpaceToWml(cssProps);
-  }
-
-  // 對齊
-  let jc = '';
-  const align = cssProps['text-align'];
-  if (align && ['left','center','right','justify'].includes(align)) jc = '<w:jc w:val="' + align + '"/>';
-
-  // 標題字級與粗體
-  let sz = '', heading = false, headingColor = '';
-  if (tag === 'h1') { sz = '<w:sz w:val="36"/><w:szCs w:val="36"/>'; heading = true; }
-  else if (tag === 'h2') { sz = '<w:sz w:val="30"/><w:szCs w:val="30"/>'; heading = true; }
-  else if (tag === 'h3') { sz = '<w:sz w:val="26"/><w:szCs w:val="26"/>'; heading = true; }
-  else if (tag === 'h4') { sz = '<w:sz w:val="24"/><w:szCs w:val="24"/>'; heading = true; }
-  else if (tag === 'h5' || tag === 'h6') { sz = '<w:sz w:val="22"/><w:szCs w:val="22"/>'; heading = true; }
-
-  // 從 CSS 取字級、粗體、顏色
-  const childCtx = Object.assign({}, ctx);
-  let runSz = '';
-  if (cssProps['font-size']) {
-    const hp = cssSizeToHalfPt(cssProps['font-size']);
-    if (hp) { runSz = '<w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/>'; childCtx.fontSize = hp; }
-  } else if (sz) {
-    runSz = sz;
-  }
-  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) {
-    childCtx.bold = true;
-  }
-  if (heading) childCtx.bold = true;
-  if (cssProps['color']) {
-    const hex = cssColorToHex(cssProps['color']);
-    if (hex) { childCtx.color = hex; headingColor = '<w:color w:val="' + hex + '"/>'; }
-  }
-
-  // 縮排
-  let ind = '';
-  if (cssProps['margin-left']) {
-    const tw = cssLenToTwip(cssProps['margin-left']);
-    if (tw) ind = '<w:ind w:left="' + tw + '"/>';
-  }
-  if (cssProps['padding-left'] && !ind) {
-    const tw = cssLenToTwip(cssProps['padding-left']);
-    if (tw) ind = '<w:ind w:left="' + tw + '"/>';
-  }
-
-  // 間距
-  let spacing = '<w:spacing w:after="120" w:line="320" w:lineRule="auto"/>';
-  if (heading) spacing = '<w:spacing w:before="160" w:after="80"/>';
-  if (cssProps['margin-bottom']) {
-    const tw = cssLenToTwip(cssProps['margin-bottom']);
-    if (tw) spacing = '<w:spacing w:after="' + tw + '" w:line="320" w:lineRule="auto"/>';
-  }
-  if (cssProps['margin-top']) {
-    const tw = cssLenToTwip(cssProps['margin-top']);
-    if (tw) spacing = '<w:spacing w:before="' + tw + '" w:after="120" w:line="320" w:lineRule="auto"/>';
-  }
-
-  // 段落背景色與邊框（section-title、answer-item 等）
-  let pBdr = '', shd = '';
-  if (cssProps['background-color']) {
-    const hex = cssColorToHex(cssProps['background-color']);
-    if (hex) shd = '<w:shd w:val="clear" w:color="auto" w:fill="' + hex + '"/>';
-  }
-  if (cssProps['border-left']) {
-    const m = cssProps['border-left'].match(/(\d+)\s*px\s*(?:solid|dashed|double)?\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
-    if (m) {
-      const sz = Math.max(4, Math.round(parseInt(m[1],10) * 8));
-      const col = cssColorToHex(m[2]) || '000000';
-      pBdr = '<w:pBdr><w:left w:val="single" w:sz="' + sz + '" w:space="4" w:color="' + col + '"/></w:pBdr>';
-    }
-  }
-  if (cssProps['border'] && /solid/i.test(cssProps['border'])) {
-    const m = cssProps['border'].match(/(\d+)\s*px\s*solid\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
-    if (m) {
-      const sz = Math.max(4, Math.round(parseInt(m[1],10) * 8));
-      const col = cssColorToHex(m[2]) || '000000';
-      pBdr = '<w:pBdr><w:top w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
-        '<w:left w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
-        '<w:bottom w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
-        '<w:right w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/></w:pBdr>';
-    }
-  }
-  // float:right 的 span（如 marks 分數）在 nodeToWml 中會前綴 tab；
-  // 段落若含 float:right 子元素，加 right tab stop 讓分數推到右側
-  let tabs = '';
-  const hasFloatRight = Array.from(node.querySelectorAll('span, div')).some(el => {
-    const s = resolveStyle(el);
-    return /right/i.test(s['float'] || '');
-  });
-  if (hasFloatRight) {
-    tabs = '<w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs>';
-  }
-
-  // run-level 屬性（sz、color）必須包在 <w:rPr> 內置於 <w:pPr>，否則 Word 拒絕開啟
-  // rPr 內順序：color 必須在 sz 之前（CT_RPr 順序）
-  let pPrRpr = '';
-  if (runSz || headingColor) {
-    pPrRpr = '<w:rPr>' + headingColor + runSz + '</w:rPr>';
-  }
-  // pPr 內元素順序（CT_PPrBase）：pageBreakBefore, pBdr, shd, tabs, spacing, ind, jc, rPr
-  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + pBdr + shd + tabs + spacing + ind + jc + pPrRpr + '</w:pPr>';
-
-  // 分離 inline 與 block 子節點
-  const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
-  const segments = [];
-  let curInline = '';
-  for (const child of Array.from(node.childNodes)) {
-    const isBlockChild = child.nodeType === Node.ELEMENT_NODE && BLOCK_CHILDREN.includes(child.tagName.toLowerCase());
-    if (isBlockChild) {
-      if (curInline) { segments.push({type:'inline', content: curInline}); curInline = ''; }
-      segments.push({type:'block', content: nodeToWml(child, childCtx)});
-    } else {
-      curInline += nodeToWml(child, childCtx);
-    }
-  }
-  if (curInline) segments.push({type:'inline', content: curInline});
-
-  let result = '';
-  for (const seg of segments) {
-    if (seg.type === 'block') {
-      result += seg.content;
-      continue;
-    }
-    // inline：切分 display math
-    const parts = seg.content.split(/\u0001DMATH\u0001([\s\S]*?)\u0001ENDDMATH\u0001/);
-    for (let i = 0; i < parts.length; i++) {
-      if (i % 2 === 0) {
-        const textRuns = parts[i];
-        const textOnly = textRuns.replace(/<[^>]+>/g, '').trim();
-        if (textOnly) {
-          result += '<w:p>' + pPr + textRuns + '</w:p>';
-        }
-      } else {
-        result += '<w:p><w:pPr><w:spacing w:before="120" w:after="120"/><w:jc w:val="center"/></w:pPr>' + parts[i] + '</w:p>';
-      }
-    }
-  }
-  if (!result) result = '<w:p>' + pPr + '</w:p>';
-  return result;
-}
-
-// 程式碼區塊 → 帶背景色、邊框、等寬字體的單格表格（保留換行與縮排）
-function codeBlockToWml(node, ctx, cssProps) {
-  cssProps = cssProps || resolveStyle(node);
-  // 取得原始文字（保留換行與縮排）
-  const rawText = node.textContent;
-  if (!rawText) return '';
-  // 用單格表格模擬 code-block（背景色 + 邊框 + 內距）
-  const bgHex = cssColorToHex(cssProps['background-color'] || '#f5f5f5') || 'F5F5F5';
-  const borderHex = cssColorToHex((cssProps['border'] || '').match(/#[0-9a-f]{3,6}/i)?.[0] || '#dddddd') || 'DDDDDD';
-  // 等寬字體
-  const rFonts = '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Consolas" w:cs="Consolas"/>';
-
-  // 把文字按換行切分，每行一個段落（同一格內）
-  const lines = rawText.split('\n');
-  let cellParas = '';
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const escaped = escapeXml(line);
-    // 保留行首空白（xml:space="preserve" 已處理）
-    const para = '<w:p><w:pPr><w:spacing w:after="0" w:line="280" w:lineRule="exact"/><w:ind w:left="0"/></w:pPr>' +
-      '<w:r><w:rPr>' + rFonts + '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>' +
-      '<w:t xml:space="preserve">' + escaped + '</w:t></w:r></w:p>';
-    cellParas += para;
-  }
-
-  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>' +
-    '<w:top w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
-    '<w:left w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
-    '<w:bottom w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
-    '<w:right w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
-    '<w:insideH w:val="none" w:sz="0"/>' +
-    '<w:insideV w:val="none" w:sz="0"/>' +
-    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
-  const tblGrid = '<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>';
-  const tcPr = '<w:tcPr><w:tcW w:w="9000" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="' + bgHex + '"/>' +
-    '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>' +
-    '<w:bottom w:w="120" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar></w:tcPr>';
-  return '<w:tbl>' + tblPr + tblGrid + '<w:tr><w:tc>' + tcPr + cellParas + '</w:tc></w:tr></w:tbl>' +
-    '<w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>';
-}
-
-// flex 容器 → 表格（每個子元素一格）
-function flexToTable(node, ctx, cssProps) {
-  const items = Array.from(node.children);
-  if (!items.length) return '';
-  const n = items.length;
-  const colW = Math.floor(9000 / n);
-  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>' +
-    '<w:top w:val="none" w:sz="0"/><w:left w:val="none" w:sz="0"/>' +
-    '<w:bottom w:val="none" w:sz="0"/><w:right w:val="none" w:sz="0"/>' +
-    '<w:insideH w:val="none" w:sz="0"/><w:insideV w:val="none" w:sz="0"/>' +
-    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
-  const tblGrid = '<w:tblGrid>' + Array(n).fill('<w:gridCol w:w="' + colW + '"/>').join('') + '</w:tblGrid>';
-  let tcWml = '';
-  for (const item of items) {
-    let cellContent = '';
-    // 處理 info-field：label + 底線 span
-    const itemCtx = Object.assign({}, ctx);
-    const itemCss = resolveStyle(item);
-    if (itemCss['font-weight'] && /bold|[6-9]00/i.test(itemCss['font-weight'])) itemCtx.bold = true;
-    for (const child of Array.from(item.childNodes)) {
-      cellContent += nodeToWml(child, itemCtx);
-    }
-    // 把所有內容包成單一段落（flex 子項通常是單行）
-    if (!cellContent.includes('<w:p>')) {
-      cellContent = '<w:p><w:pPr><w:spacing w:after="40"/></w:pPr>' + cellContent + '</w:p>';
-    }
-    // 處理底線填空 span（info-line）
-    const tcPr = '<w:tcPr><w:tcW w:w="' + colW + '" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr>';
-    tcWml += '<w:tc>' + tcPr + cellContent + '</w:tc>';
-  }
-  return '<w:tbl>' + tblPr + tblGrid + '<w:tr>' + tcWml + '</w:tr></w:tbl>';
-}
-
-// 空白答題區 → 多行底線
-function answerSpaceToWml(cssProps) {
-  let lines = 3;
-  const mh = cssProps['min-height'] || '';
-  const m = mh.match(/(\d+)/);
-  if (m) {
-    const px = parseInt(m[1], 10);
-    lines = Math.max(1, Math.round(px / 25));
-  }
-  let wml = '<w:p><w:pPr><w:spacing w:before="120" w:after="120"/></w:pPr></w:p>';
-  for (let i = 0; i < lines; i++) {
-    wml += '<w:p><w:pPr><w:pBdr><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="999999"/></w:pBdr><w:spacing w:after="0"/></w:pPr></w:p>';
-  }
-  return wml;
-}
-
-function textToWmlRuns(text, ctx) {
-  if (!text) return '';
-  // 非數學類科目：不轉換公式，$...$ 直接當普通文字輸出（保留原貌含 $ 符號）
-  if (!MATH_SUBJECT_ACTIVE) {
-    return makeTextRun(text, ctx);
-  }
-  const runs = [];
-  // 匹配 $$...$$ 或 $...$，但跳過 \$ 跳脫
-  const placeholders = [];
-  let work = text.replace(/\\\$/g, () => {
-    placeholders.push('$');
-    return '\u0001DOLLAR\u0001';
-  });
-  const regex = /(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g;
-  let lastIndex = 0;
-  let match;
-  while ((match = regex.exec(work)) !== null) {
-    if (match.index > lastIndex) {
-      runs.push(makeTextRun(restoreDollar(work.slice(lastIndex, match.index), placeholders), ctx));
-    }
-    const m = match[0];
-    if (m.startsWith('$$')) {
-      const latex = restoreDollar(m.slice(2, -2).trim(), placeholders);
-      const omml = latexToOmml(latex, true);
-      runs.push('\u0001DMATH\u0001' + omml + '\u0001ENDDMATH\u0001');
-    } else {
-      const latex = restoreDollar(m.slice(1, -1).trim(), placeholders);
-      const omml = latexToOmml(latex, false);
-      runs.push(omml);
-    }
-    lastIndex = match.index + m.length;
-  }
-  if (lastIndex < work.length) {
-    runs.push(makeTextRun(restoreDollar(work.slice(lastIndex), placeholders), ctx));
-  }
-  return runs.join('');
-}
-
-function restoreDollar(s, placeholders) {
-  let i = 0;
-  return s.replace(/\u0001DOLLAR\u0001/g, () => placeholders[i++] || '$');
-}
-
-function makeTextRun(text, ctx) {
-  if (!text) return '';
-  const escaped = escapeXml(text);
-  // CT_RPr 嚴格順序：b, i, strike, color, sz, szCs, u, vertAlign
-  const props = [];
-  if (ctx.bold) props.push('<w:b/>');
-  if (ctx.italic) props.push('<w:i/>');
-  if (ctx.strike) props.push('<w:strike/>');
-  if (ctx.color) props.push('<w:color w:val="' + ctx.color + '"/>');
-  if (ctx.fontSize) props.push('<w:sz w:val="' + ctx.fontSize + '"/><w:szCs w:val="' + ctx.fontSize + '"/>');
-  if (ctx.underline) props.push('<w:u w:val="single"/>');
-  if (ctx.superscript) props.push('<w:vertAlign w:val="superscript"/>');
-  if (ctx.subscript) props.push('<w:vertAlign w:val="subscript"/>');
-  let rPr = props.length ? '<w:rPr>' + props.join('') + '</w:rPr>' : '';
-  if (text.indexOf('\n') >= 0) {
-    const segs = text.split('\n');
-    let out = '';
-    for (let i = 0; i < segs.length; i++) {
-      if (i > 0) out += '<w:r>' + rPr + '<w:br/></w:r>';
-      if (segs[i]) out += '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(segs[i]) + '</w:t></w:r>';
-    }
-    return out;
-  }
-  return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escaped + '</w:t></w:r>';
-}
-
-function escapeXml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 // 安全清洗：移除所有 <script>、<iframe>、on* 事件處理器，以及已知惡意網域引用
 function sanitizeHtmlForPreview(html) {
   let s = String(html || '');
@@ -1737,278 +1951,6 @@ function sanitizeHtmlForPreview(html) {
     s = s.replace(new RegExp('@import\\s+[^;]*' + esc + '[^;]*;?', 'gi'), '');
   }
   return s;
-}
-
-function tableToWml(node, ctx) {
-  const rows = Array.from(node.querySelectorAll('tr'));
-  if (!rows.length) return '';
-  // 計算最大欄數
-  let maxCols = 1;
-  for (const r of rows) {
-    const c = r.querySelectorAll('td, th').length;
-    if (c > maxCols) maxCols = c;
-  }
-  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/>' +
-    '<w:tblBorders>' +
-    '<w:top w:val="single" w:sz="4" w:color="000000"/>' +
-    '<w:left w:val="single" w:sz="4" w:color="000000"/>' +
-    '<w:bottom w:val="single" w:sz="4" w:color="000000"/>' +
-    '<w:right w:val="single" w:sz="4" w:color="000000"/>' +
-    '<w:insideH w:val="single" w:sz="4" w:color="000000"/>' +
-    '<w:insideV w:val="single" w:sz="4" w:color="000000"/>' +
-    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
-  const tblGrid = '<w:tblGrid>' + Array(maxCols).fill('<w:gridCol w:w="' + Math.floor(9000/maxCols) + '"/>').join('') + '</w:tblGrid>';
-
-  let trWml = '';
-  for (const row of rows) {
-    const cells = Array.from(row.querySelectorAll('td, th'));
-    let tcWml = '';
-    for (const cell of cells) {
-      const isHeader = cell.tagName.toLowerCase() === 'th';
-      const cellCtx = Object.assign({}, ctx, { bold: ctx.bold || isHeader });
-      let cellContent = '';
-      for (const child of Array.from(cell.childNodes)) {
-        cellContent += nodeToWml(child, cellCtx);
-      }
-      // 確保至少一個段落
-      if (!cellContent || cellContent.indexOf('<w:p>') < 0) {
-        cellContent = '<w:p>' + cellContent + '</w:p>';
-      }
-      const tcPr = '<w:tcPr><w:tcW w:w="' + Math.floor(9000/maxCols) + '" w:type="dxa"/>' +
-        (isHeader ? '<w:shd w:val="clear" w:color="auto" w:fill="E8E8E8"/>' : '') +
-        '<w:vAlign w:val="top"/></w:tcPr>';
-      tcWml += '<w:tc>' + tcPr + cellContent + '</w:tc>';
-    }
-    trWml += '<w:tr>' + tcWml + '</w:tr>';
-  }
-  return '<w:tbl>' + tblPr + tblGrid + trWml + '</w:tbl>';
-}
-
-function listToWml(node, ctx, tag) {
-  let wml = '';
-  const items = Array.from(node.children).filter(c => c.tagName.toLowerCase() === 'li');
-  let idx = 1;
-  for (const item of items) {
-    const prefix = tag === 'ol' ? (idx + '. ') : '• ';
-    let content = '';
-    for (const child of Array.from(item.childNodes)) {
-      content += nodeToWml(child, ctx);
-    }
-    const pPr = '<w:pPr><w:spacing w:after="60"/><w:ind w:left="480" w:hanging="360"/></w:pPr>';
-    wml += '<w:p>' + pPr + makeTextRun(prefix, ctx) + content + '</w:p>';
-    idx++;
-  }
-  return wml;
-}
-
-// ============ LaTeX → MathML → OMML 轉換 ============
-const OMML_MATH_FUNCS = ['sin','cos','tan','sec','csc','cot','sinh','cosh','tanh','log','ln','lim','max','min','exp','arcsin','arccos','arctan','det','dim','gcd','inf','sup'];
-
-function latexToOmml(latex, displayMode) {
-  if (typeof temml === 'undefined') {
-    return makeTextRun('[公式: ' + latex + ']', { italic: true });
-  }
-  try {
-    const mathmlStr = temml.renderToString(latex, {
-      displayMode: displayMode,
-      throwOnError: false,
-      wrap: 'none'
-    });
-    const doc = new DOMParser().parseFromString(mathmlStr, 'application/xml');
-    let mathNode = doc.documentElement;
-    if (!mathNode || (mathNode.localName !== 'math' && mathNode.tagName !== 'math')) {
-      mathNode = doc.querySelector('math');
-    }
-    if (!mathNode) {
-      return makeTextRun('[公式轉換失敗: ' + latex + ']', { italic: true });
-    }
-    return mathmlToOmml(mathNode, displayMode);
-  } catch (e) {
-    console.warn('LaTeX→OMML 失敗:', latex, e);
-    return makeTextRun('[公式: ' + latex + ']', { italic: true });
-  }
-}
-
-function mathmlToOmml(mathNode, displayMode) {
-  const inner = convertMathNodes(Array.from(mathNode.childNodes));
-  if (displayMode) {
-    return '<m:oMathPara><m:oMathParaPr><m:jc m:val="center"/></m:oMathParaPr><m:oMath>' + inner + '</m:oMath></m:oMathPara>';
-  }
-  return '<m:oMath>' + inner + '</m:oMath>';
-}
-
-function convertMathNodes(nodes) {
-  let result = '';
-  for (const node of nodes) {
-    result += convertMathNode(node);
-  }
-  return result;
-}
-
-function getLocalTag(node) {
-  if (!node || node.nodeType !== Node.ELEMENT_NODE) return '';
-  return node.localName || (node.tagName || '').toLowerCase().replace(/^m:/, '');
-}
-
-function elementChildren(node) {
-  return Array.from(node.childNodes).filter(n => n.nodeType === Node.ELEMENT_NODE);
-}
-
-function convertMathNode(node) {
-  if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.textContent;
-    if (!text) return '';
-    // 純文字節點視為正體 run
-    return mRun(text, 'p');
-  }
-  if (node.nodeType !== Node.ELEMENT_NODE) return '';
-
-  const tag = getLocalTag(node);
-  const kids = elementChildren(node);
-
-  switch (tag) {
-    case 'math':
-      return convertMathNodes(Array.from(node.childNodes));
-    case 'mrow':
-    case 'mstyle':
-    case 'mpadded':
-    case 'mphantom':
-      if (tag === 'mphantom') return '';
-      return convertMathNodes(Array.from(node.childNodes));
-    case 'mi': {
-      const text = node.textContent;
-      const isFunc = OMML_MATH_FUNCS.includes(text);
-      return mRun(text, isFunc ? 'p' : 'i');
-    }
-    case 'mn':
-      return mRun(node.textContent, 'p');
-    case 'mo':
-      return mRun(node.textContent, 'p');
-    case 'mtext':
-    case 'ms':
-      return mRun(node.textContent, 'p');
-    case 'mspace':
-      return '';
-    case 'msup': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      return '<m:sSup><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
-        '<m:sup>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sup></m:sSup>';
-    }
-    case 'msub': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      return '<m:sSub><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
-        '<m:sub>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sub></m:sSub>';
-    }
-    case 'msubsup': {
-      if (kids.length < 3) return convertMathNodes(kids);
-      return '<m:sSubSup><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
-        '<m:sub>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sub>' +
-        '<m:sup>' + convertMathNodes(Array.from(kids[2].childNodes)) + '</m:sup></m:sSubSup>';
-    }
-    case 'mfrac': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      return '<m:f><m:num>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:num>' +
-        '<m:den>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:den></m:f>';
-    }
-    case 'msqrt': {
-      return '<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/>' +
-        '<m:e>' + convertMathNodes(Array.from(node.childNodes)) + '</m:e></m:rad>';
-    }
-    case 'mroot': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      return '<m:rad><m:deg>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:deg>' +
-        '<m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e></m:rad>';
-    }
-    case 'munder': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      const baseText = kids[0].textContent;
-      const underContent = convertMathNodes(Array.from(kids[1].childNodes));
-      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
-      if (['∑','∏','∫','⋃','⋂','⊕','⊗','∮','⨁','⨂'].includes(baseText)) {
-        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/>' +
-          '<m:subHide m:val="0"/><m:supHide m:val="1"/></m:naryPr>' +
-          '<m:sub>' + underContent + '</m:sub><m:sup/><m:e/></m:nary>';
-      }
-      return '<m:limLow><m:e>' + baseContent + '</m:e><m:lim>' + underContent + '</m:lim></m:limLow>';
-    }
-    case 'mover': {
-      if (kids.length < 2) return convertMathNodes(kids);
-      const baseText = kids[0].textContent;
-      const overText = kids[1].textContent;
-      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
-      const overContent = convertMathNodes(Array.from(kids[1].childNodes));
-      if (['∑','∏','∫','⋃','⋂','∮'].includes(baseText)) {
-        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/>' +
-          '<m:subHide m:val="1"/><m:supHide m:val="0"/></m:naryPr>' +
-          '<m:sub/><m:sup>' + overContent + '</m:sup><m:e/></m:nary>';
-      }
-      // 重音符號
-      if (['^','̂','ˆ'].includes(overText)) {
-        return '<m:acc><m:accPr><m:chr m:val="^"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
-      }
-      if (['¯','ˉ','‾','→','⃗','⇀'].includes(overText)) {
-        return '<m:acc><m:accPr><m:chr m:val="' + escapeXml(overText) + '"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
-      }
-      if (overText === '.' || overText === '˙') {
-        return '<m:acc><m:accPr><m:chr m:val="."/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
-      }
-      if (overText === '¨') {
-        return '<m:acc><m:accPr><m:chr m:val="¨"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
-      }
-      return '<m:limUpp><m:e>' + baseContent + '</m:e><m:lim>' + overContent + '</m:lim></m:limUpp>';
-    }
-    case 'munderover': {
-      if (kids.length < 3) return convertMathNodes(kids);
-      const baseText = kids[0].textContent;
-      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
-      const underContent = convertMathNodes(Array.from(kids[1].childNodes));
-      const overContent = convertMathNodes(Array.from(kids[2].childNodes));
-      if (['∑','∏','∫','⋃','⋂','∮','⨁','⨂'].includes(baseText)) {
-        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/></m:naryPr>' +
-          '<m:sub>' + underContent + '</m:sub><m:sup>' + overContent + '</m:sup><m:e/></m:nary>';
-      }
-      return '<m:limLow><m:e>' + baseContent + '</m:e><m:lim>' + underContent + '</m:lim></m:limLow>' +
-        '<m:limUpp><m:e/><m:lim>' + overContent + '</m:lim></m:limUpp>';
-    }
-    case 'mtable': {
-      const rows = elementChildren(node).filter(n => getLocalTag(n) === 'mtr');
-      let mRows = '';
-      let colCount = 1;
-      for (const row of rows) {
-        const cells = elementChildren(row).filter(n => getLocalTag(n) === 'mtd');
-        if (cells.length > colCount) colCount = cells.length;
-        let mCells = '';
-        for (const cell of cells) {
-          mCells += '<m:e>' + convertMathNodes(Array.from(cell.childNodes)) + '</m:e>';
-        }
-        mRows += '<m:mr>' + mCells + '</m:mr>';
-      }
-      const mcPr = '<m:mc><m:mcPr><m:count m:val="' + colCount + '"/><m:mcJc m:val="center"/></m:mcPr></m:mc>';
-      return '<m:m><m:mPr>' + mcPr + '</m:mPr>' + mRows + '</m:m>';
-    }
-    case 'mfenced': {
-      const open = node.getAttribute('open') || '(';
-      const close = node.getAttribute('close') || ')';
-      const inner = convertMathNodes(kids);
-      return '<m:d><m:dPr><m:begChr m:val="' + escapeXml(open) + '"/><m:endChr m:val="' + escapeXml(close) + '"/></m:dPr>' +
-        '<m:e>' + inner + '</m:e></m:d>';
-    }
-    case 'merror':
-      return mRun(node.textContent, 'p');
-    case 'mglyph':
-      return '';
-    default:
-      return convertMathNodes(Array.from(node.childNodes));
-  }
-}
-
-function mRun(text, style) {
-  if (!text) return '';
-  let rPr = '';
-  if (style === 'i') rPr = '<m:rPr><m:sty m:val="i"/></m:rPr>';
-  else if (style === 'b') rPr = '<m:rPr><m:sty m:val="b"/></m:rPr>';
-  else if (style === 'bi') rPr = '<m:rPr><m:sty m:val="bi"/></m:rPr>';
-  return '<m:r>' + rPr + '<m:t xml:space="preserve">' + escapeXml(text) + '</m:t></m:r>';
 }
 
 function copyOutput() {
