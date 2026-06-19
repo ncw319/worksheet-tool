@@ -2,12 +2,23 @@
 <html lang="zh-HK">
 <head>
 <meta charset="UTF-8">
-<title>黃楚標中學 - AI 會議紀錄生成工具</title>
+<title>黃楚標中學 - AI 工作紙生成工具</title>
 <script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+<!-- LaTeX → MathML 轉換（公式核心） -->
+<script src="https://cdn.jsdelivr.net/npm/temml@0.10.24/dist/temml.min.js"></script>
+<!-- MathJax：預覽區渲染公式 -->
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$','$'],['\\(','\\)']], displayMath: [['$$','$$'],['\\[','\\]']] },
+    svg: { fontCache: 'global' },
+    startup: { typeset: false }
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -35,7 +46,7 @@
     display: block; font-weight: 600; margin-bottom: 6px;
     color: #2a5298; font-size: 14px;
   }
-  input[type="text"], input[type="password"], input[type="datetime-local"], select, textarea {
+  input[type="text"], input[type="password"], select, textarea {
     width: 100%; padding: 10px 12px; border: 2px solid #ddd;
     border-radius: 8px; font-size: 14px; font-family: inherit;
     transition: border-color 0.2s;
@@ -67,15 +78,6 @@
   .radio-group label:has(input:checked) {
     border-color: #2a5298; background: #e8f0ff;
   }
-  .checkbox-group {
-    display: flex; align-items: flex-start; gap: 10px;
-    padding: 12px; border: 2px solid #ddd; border-radius: 8px;
-    cursor: pointer; transition: all 0.2s;
-  }
-  .checkbox-group:hover { border-color: #2a5298; background: #f0f4ff; }
-  .checkbox-group input { margin-top: 3px; }
-  .checkbox-group .label-text { font-weight: 600; color: #2a5298; }
-  .checkbox-group .hint { font-size: 12px; color: #666; margin-top: 2px; }
   .btn {
     width: 100%; padding: 14px; border: none; border-radius: 8px;
     background: linear-gradient(135deg, #c41e3a, #8b0000);
@@ -84,10 +86,6 @@
   }
   .btn:hover:not(:disabled) { transform: translateY(-2px); }
   .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-  .btn-secondary {
-    background: linear-gradient(135deg, #2a5298, #1e3c72);
-    margin-top: 8px;
-  }
   .progress-area {
     background: #1e1e1e; color: #d4d4d4; padding: 16px;
     border-radius: 8px; min-height: 200px; max-height: 300px;
@@ -112,14 +110,13 @@
     height: 100%; background: linear-gradient(90deg, #2a5298, #c41e3a);
     width: 0%; transition: width 0.3s;
   }
-  .download-buttons { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .download-buttons { display: flex; gap: 10px; margin-top: 12px; }
   .download-buttons button {
-    flex: 1; min-width: 140px; padding: 10px; border: 2px solid #2a5298;
+    flex: 1; padding: 10px; border: 2px solid #2a5298;
     background: white; color: #2a5298; border-radius: 8px;
     cursor: pointer; font-weight: 600;
   }
   .download-buttons button:hover { background: #2a5298; color: white; }
-  .download-buttons button:disabled { opacity: 0.5; cursor: not-allowed; }
   .model-hint {
     margin-top: 8px; padding: 10px 12px; border-left: 4px solid #2a5298;
     background: #f0f4ff; border-radius: 6px; color: #244064;
@@ -128,21 +125,110 @@
   .model-hint.warning { border-left-color: #c41e3a; background: #fff4f4; color: #7b1a27; }
   h3 { color: #2a5298; margin-bottom: 14px; font-size: 17px;
        border-bottom: 2px solid #2a5298; padding-bottom: 6px; }
-  .meeting-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .hidden { display: none; }
   @media (max-width: 768px) {
     .main { grid-template-columns: 1fr; }
     .panel.left { border-right: none; border-bottom: 1px solid #eee; }
-    .row, .meeting-info-grid { grid-template-columns: 1fr; }
   }
+  /* 快捷設定標籤 */
+  .preset-block {
+    margin-top: 10px; padding: 10px 12px;
+    background: #fafbff; border: 1px solid #e5e9f5; border-radius: 8px;
+  }
+  .preset-label {
+    font-size: 12px; font-weight: 600; color: #555;
+    margin-bottom: 8px; letter-spacing: 0.3px;
+  }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    padding: 5px 12px; border: 1.5px solid #cdd5e8; border-radius: 999px;
+    background: #fff; color: #4a5575; font-size: 13px; cursor: pointer;
+    font-family: inherit; transition: all 0.15s; user-select: none;
+  }
+  .tag:hover { border-color: #2a5298; color: #2a5298; }
+  .tag.active {
+    background: linear-gradient(135deg, #2a5298, #1e3c72);
+    color: #fff; border-color: #1e3c72;
+    box-shadow: 0 2px 6px rgba(42, 82, 152, 0.35);
+  }
+  .preset-reset {
+    margin-top: 10px; padding: 6px 14px; background: transparent;
+    border: 1px dashed #aaa; border-radius: 6px; color: #777;
+    font-size: 12px; cursor: pointer; font-family: inherit;
+    transition: all 0.15s;
+  }
+  .preset-reset:hover { color: #c41e3a; border-color: #c41e3a; }
+  /* 參照過往工作紙開關 */
+  .preset-ref { border-left: 4px solid #c41e3a; background: #fff8f8; }
+  .preset-toggle { display: inline-flex; align-items: center; vertical-align: middle; margin-right: 8px; }
+  .preset-toggle input { display: none; }
+  .toggle-track {
+    width: 38px; height: 20px; background: #ccc; border-radius: 999px;
+    position: relative; transition: background 0.2s; display: inline-block;
+  }
+  .toggle-thumb {
+    position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    background: #fff; border-radius: 50%; transition: left 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .preset-toggle input:checked + .toggle-track { background: #c41e3a; }
+  .preset-toggle input:checked + .toggle-track .toggle-thumb { left: 20px; }
+  .preset-hint {
+    margin-top: 8px; padding: 8px 10px; background: #ffeaea;
+    border-radius: 6px; font-size: 12px; color: #7b1a27; line-height: 1.5;
+  }
+  .preset-block.disabled { opacity: 0.45; pointer-events: none; }
+  /* 題型 + 題數控件 */
+  .qtype-item { display: inline-flex; align-items: center; margin: 2px; }
+  .qcount {
+    display: inline-flex; align-items: center; margin-left: 4px;
+    background: #eef2ff; border: 1px solid #c5cdf0; border-radius: 999px;
+    overflow: hidden;
+  }
+  .qc-btn {
+    width: 22px; height: 26px; border: none; background: transparent;
+    color: #2a5298; font-size: 15px; font-weight: 700; cursor: pointer;
+    font-family: inherit; transition: background 0.1s;
+  }
+  .qc-btn:hover { background: #d8e0ff; }
+  .qc-input {
+    width: 32px; height: 26px; border: none; text-align: center;
+    font-size: 13px; font-family: inherit; font-weight: 600; color: #2a5298;
+    background: transparent; -moz-appearance: textfield;
+  }
+  .qc-input::-webkit-outer-spin-button,
+  .qc-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .qc-unit { font-size: 11px; color: #667; padding-right: 6px; }
+  .qtotal {
+    margin-top: 8px; font-size: 12px; font-weight: 600;
+    color: #c41e3a; text-align: right;
+  }
+  /* Poe Token 餘額小角落 */
+  .poe-token-widget {
+    position: fixed; bottom: 12px; right: 12px; z-index: 9999;
+    background: rgba(30, 60, 24, 0.92); color: #d7f5d0;
+    border: 1px solid #4ade80; border-radius: 10px;
+    padding: 8px 12px; font-family: "Consolas", monospace;
+    font-size: 11px; line-height: 1.4; box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+    cursor: pointer; user-select: none; max-width: 260px;
+    backdrop-filter: blur(4px); transition: opacity 0.2s, transform 0.2s;
+  }
+  .poe-token-widget:hover { transform: translateY(-2px); }
+  .poe-token-widget .pt-title {
+    font-weight: 700; color: #4ade80; letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 6px; margin-bottom: 2px;
+  }
+  .poe-token-widget .pt-value { font-size: 13px; font-weight: 700; color: #fff; }
+  .poe-token-widget .pt-sub { color: #a7f3d0; font-size: 10px; }
+  .poe-token-widget .pt-error { color: #f48771; font-size: 10px; margin-top: 2px; }
+  .poe-token-widget.minimized .pt-body { display: none; }
 </style>
 </head>
 <body>
 
 <div class="container">
   <div class="header">
-    <h1>📋 黃楚標中學 AI 會議紀錄生成工具</h1>
-    <p>香港教育工作者聯會黃楚標中學 · 教職員專用</p>
+    <h1>📝 黃楚標中學 AI 工作紙生成工具</h1>
+    <p>香港教育工作者聯會黃楚標中學 · 教師專用</p>
   </div>
 
   <div class="main">
@@ -151,98 +237,224 @@
       <h3>⚙️ 生成設定</h3>
 
       <div class="form-group">
-        <label>POE API Endpoint</label>
-        <input type="text" id="apiBaseUrl" value="https://api.poe.com/v1" placeholder="輸入 POE API Endpoint">
+        <label>Poe API Endpoint</label>
+        <input type="text" id="apiBaseUrl" value="https://api.poe.com/v1" placeholder="輸入 Poe API Endpoint">
       </div>
 
       <div class="form-group">
-        <label>POE API Key</label>
-        <input type="password" id="apiKey" value="sk-poe-9_d97DWxeyG1pnXThengNH67JKjfwaJ5ZYJbTjN_SQY" placeholder="輸入您的 POE API Key" autocomplete="off">
+        <label>Poe API Key</label>
+        <input type="password" id="apiKey" value="sk-poe-9_d97DWxeyG1pnXThengNH67JKjfwaJ5ZYJbTjN_SQY" placeholder="輸入您的 Poe API Key" autocomplete="off">
       </div>
 
       <div class="form-group">
-        <label>選擇生成會議紀錄的 AI 模型</label>
+        <label>選擇 AI 模型</label>
         <select id="model">
-          <option value="Qwen3.7-Plus" selected>Qwen3.7-Plus</option>
+          <option value="qwen3.6-plus" selected>qwen3.6-plus（通義千問 3.6 Plus）</option>
+          <option value="glm-5.2-el">glm-5.2-el（智譜 GLM-5.2 EL）</option>
+          <option value="deepseek-v4-pro-el">deepseek-v4-pro-el（DeepSeek V4 Pro EL）</option>
         </select>
         <div id="modelHint" class="model-hint"></div>
       </div>
 
-      <div class="form-group">
-        <label>語音轉文字（Speech-to-Text）服務</label>
-        <select id="sttProvider" onchange="updateSttUI()" style="display:none;">
-          <option value="qwen" selected>qwen3.5-omni-plus（語音轉文字）</option>
-        </select>
-        <div class="model-hint">
-          💡 使用 <strong>qwen3.5-omni-plus</strong> 進行語音轉文字，透過 POE API 調用。支援廣東話及英語混合，如轉錄失敗請改用專用 Whisper API。
-        </div>
-      </div>
-
-      <div class="form-group hidden" id="sttEndpointGroup">
-        <label>STT API Endpoint</label>
-        <input type="text" id="sttEndpoint" value="" placeholder="輸入 STT API Endpoint">
-      </div>
-
-      <div class="form-group hidden" id="sttKeyGroup">
-        <label id="sttKeyLabel">STT API Key</label>
-        <input type="password" id="sttApiKey" placeholder="輸入對應服務的 API Key" autocomplete="off">
-      </div>
-
-      <div class="form-group hidden" id="sttModelGroup">
-        <label id="sttModelLabel">STT 模型</label>
-        <select id="sttModel">
-          <option value="qwen3.5-omni-plus" selected>qwen3.5-omni-plus</option>
-        </select>
-      </div>
-
-      <p class="model-hint warning" id="audioFormatHint" style="display:none;">
-        ⚠️ 請注意：AAC 純音訊檔可能不被部分 STT 服務直接支援。如遇錯誤，請將錄音轉存為 MP3 或 M4A 後再上傳。
-      </p>
-
-      <h3>📝 會議資料</h3>
-      <div class="meeting-info-grid">
-        <div class="form-group">
-          <label>會議名稱</label>
-          <input type="text" id="meetingName" placeholder="例：第三十三屆第二次教職員會議">
-        </div>
-        <div class="form-group">
-          <label>會議日期及時間</label>
-          <input type="datetime-local" id="meetingDatetime">
-        </div>
-      </div>
-
       <div class="row">
         <div class="form-group">
-          <label>地點 / 線上平台</label>
-          <input type="text" id="meetingLocation" placeholder="例：U205 會議室 / Zoom">
+          <label>年級</label>
+          <select id="grade">
+            <option value="中一">中一</option>
+            <option value="中二">中二</option>
+            <option value="中三">中三</option>
+            <option value="中四">中四</option>
+            <option value="中五">中五</option>
+            <option value="中六">中六</option>
+          </select>
         </div>
         <div class="form-group">
-          <label>主席</label>
-          <input type="text" id="meetingChair" placeholder="例：陳大明副校長">
+          <label>科目</label>
+          <select id="subject">
+            <option value="中國語文">中國語文</option>
+            <option value="中國文學">中國文學</option>
+            <option value="英國語文">英國語文</option>
+            <option value="英文Oral">英文Oral</option>
+            <option value="數學">數學</option>
+            <option value="數學（延伸部分 – 單元二）">數學（延伸部分 – 單元二）</option>
+            <option value="資訊及通訊科技">資訊及通訊科技</option>
+            <option value="生物">生物</option>
+            <option value="化學">化學</option>
+            <option value="物理">物理</option>
+            <option value="綜合科學">綜合科學</option>
+            <option value="企業、會計與財務概論">企業、會計與財務概論</option>
+            <option value="普通電腦科">普通電腦科</option>
+            <option value="人工智能科技">人工智能科技</option>
+            <option value="中國歷史">中國歷史</option>
+            <option value="公民、經濟與社會">公民、經濟與社會</option>
+            <option value="經濟">經濟</option>
+            <option value="地理">地理</option>
+            <option value="歷史">歷史</option>
+            <option value="旅遊與款待">旅遊與款待</option>
+            <option value="視覺藝術">視覺藝術</option>
+            <option value="音樂">音樂</option>
+            <option value="體育">體育</option>
+          </select>
         </div>
       </div>
 
       <div class="form-group">
-        <label>出席者 / 列席者</label>
-        <textarea id="meetingAttendees" placeholder="例：全體教職員、陳老師（學生輔導主任）列席&#10;如人數過多可輸入「見簽到表」"></textarea>
+        <label>工作紙主題 / 課題</label>
+        <input type="text" id="topic" placeholder="例：二次方程、唐詩賞析、光合作用">
       </div>
 
       <div class="form-group">
-        <label>具體要求與備註</label>
-        <textarea id="requirements" placeholder="例：會議紀錄需列出議程、逐項記錄討論要點、行動項目及負責人、下次會議日期。語氣正式，適合存檔。"></textarea>
+        <label>⚡ 快捷設定（點選即可，無需打字）</label>
+
+        <div class="preset-block preset-ref">
+          <div class="preset-label">
+            <label class="preset-toggle" id="refModeToggle">
+              <input type="checkbox" id="refModeCheck">
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            ① 參照過往工作紙（開啟後忽略下方設定，直接仿照上傳的「格式參考」文件）
+          </div>
+          <div class="preset-hint" id="refModeHint" style="display:none;">
+            ✅ 已啟用：將以您下方上傳的「📄 上傳過往工作紙（作格式參考）」為藍本，仿照其題型配置、題數比例、難度與排版風格生成。
+          </div>
+        </div>
+
+        <div class="preset-block" id="customBlock">
+          <div class="preset-label">② 題型與題數（點選啟用，旁邊可調題數）</div>
+          <div class="tag-row" id="qTypeTags">
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="選擇題">選擇題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="5" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="填充題">填充題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="5" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="配對題">配對題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="5" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="判斷題">判斷題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="5" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="短答題">短答題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="5" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="長答題">長答題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="2" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="應用題">應用題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="3" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="繪圖題">繪圖題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="2" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="實作題">實作題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="2" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+            <span class="qtype-item">
+              <button type="button" class="tag" data-val="資料回應題">資料回應題</button>
+              <span class="qcount" style="display:none;">
+                <button type="button" class="qc-btn" data-delta="-1">−</button>
+                <input type="number" class="qc-input" value="2" min="0" max="99">
+                <button type="button" class="qc-btn" data-delta="1">+</button>
+                <span class="qc-unit">題</span>
+              </span>
+            </span>
+          </div>
+          <div class="qtotal" id="qTotal">共 0 題</div>
+        </div>
+
+        <div class="preset-block">
+          <div class="preset-label">③ 難度</div>
+          <div class="tag-row" id="difficultyTags" data-single="1">
+            <button type="button" class="tag" data-val="基礎">基礎</button>
+            <button type="button" class="tag" data-val="中等">中等</button>
+            <button type="button" class="tag" data-val="進階">進階</button>
+            <button type="button" class="tag active" data-val="由淺入深">由淺入深</button>
+          </div>
+        </div>
+
+        <div class="preset-block">
+          <div class="preset-label">④ 附加選項（可多選）</div>
+          <div class="tag-row" id="optionTags">
+            <button type="button" class="tag active" data-val="附答案">附答案</button>
+            <button type="button" class="tag active" data-val="附解析">附解析</button>
+            <button type="button" class="tag" data-val="附評分表">附評分表</button>
+            <button type="button" class="tag" data-val="附英文版">附英文版</button>
+          </div>
+        </div>
+
+        <button type="button" class="preset-reset" id="presetReset">↺ 重設為預設</button>
       </div>
 
       <div class="form-group">
-        <label>📚 上傳本次會議議程及參考資料（可多選，支援 PDF/DOCX/TXT/圖片）</label>
+        <label>具體要求（題型、難度、題數等）— 可直接使用上方快捷設定，或手動編輯下方文字</label>
+        <textarea id="requirements" placeholder="例：包括 10 題選擇題、5 題短答題、2 題長題目；難度由淺入深；附答案"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>📚 上傳參考教材（可多選，支援 PDF/DOCX/TXT/圖片）</label>
         <div class="file-upload" onclick="document.getElementById('refFiles').click()">
-          <div>📎 點擊上傳議程及參考資料</div>
+          <div>📎 點擊上傳參考教材</div>
           <input type="file" id="refFiles" multiple accept=".pdf,.docx,.txt,.png,.jpg,.jpeg">
         </div>
         <div class="file-list" id="refFileList"></div>
       </div>
 
       <div class="form-group">
-        <label>📄 上傳過往會議紀錄（作格式參考）</label>
+        <label>📄 上傳過往工作紙（作格式參考）</label>
         <div class="file-upload" onclick="document.getElementById('formatFiles').click()">
           <div>📎 點擊上傳格式參考</div>
           <input type="file" id="formatFiles" multiple accept=".pdf,.docx,.txt">
@@ -251,45 +463,16 @@
       </div>
 
       <div class="form-group">
-        <label>🎙️ 上傳會議錄音（MP3 / AAC / M4A / WAV，會自動轉錄並經 AI 校正）</label>
-        <div class="file-upload" onclick="document.getElementById('audioFile').click()">
-          <div>🎵 點擊上傳會議錄音</div>
-          <input type="file" id="audioFile" accept=".mp3,.aac,.m4a,.wav,audio/mpeg,audio/mp4,audio/aac,audio/wav">
-        </div>
-        <div class="file-list" id="audioFileList"></div>
-      </div>
-
-      <div class="form-group">
-        <label>📄 或上傳已有逐字稿（PDF/DOCX/TXT，會直接使用而不經語音轉文字）</label>
-        <div class="file-upload" onclick="document.getElementById('transcriptFile').click()">
-          <div>📎 點擊上傳逐字稿</div>
-          <input type="file" id="transcriptFile" accept=".pdf,.docx,.txt">
-        </div>
-        <div class="file-list" id="transcriptFileList"></div>
-      </div>
-
-      <div class="form-group">
-        <label>額外輸出</label>
-        <label class="checkbox-group" for="outputTranscript">
-          <input type="checkbox" id="outputTranscript">
-          <div>
-            <div class="label-text">輸出逐字稿（經 AI 校正後）</div>
-            <div class="hint">會額外生成一份 DOCX 逐字稿，包含說話者分段及標點修正。</div>
-          </div>
-        </label>
-      </div>
-
-      <div class="form-group">
         <label>輸出格式</label>
         <div class="radio-group">
           <label>
             <input type="radio" name="format" value="docx" checked>
-            <span>📘 DOCX (Word)</span>
+            <span>📘 DOCX (Word，含原生方程式)</span>
           </label>
         </div>
       </div>
 
-      <button class="btn" id="generateBtn" onclick="generateMinutes()">🚀 開始生成會議紀錄</button>
+      <button class="btn" id="generateBtn" onclick="generateWorksheet()">🚀 開始生成工作紙</button>
     </div>
 
     <!-- 右面板：進度與預覽 -->
@@ -299,7 +482,7 @@
         <div class="progress-bar-fill" id="progressBar"></div>
       </div>
       <div class="progress-area" id="progressArea">
-        <div class="info">[系統就緒] 請填寫左側資料並點擊「開始生成會議紀錄」...</div>
+        <div class="info">[系統就緒] 請填寫左側資料並點擊「開始生成工作紙」...</div>
       </div>
 
       <h3>👁️ 預覽</h3>
@@ -308,34 +491,300 @@
       </div>
 
       <div class="download-buttons" id="downloadButtons" style="display:none;">
-        <button id="downloadMinutesBtn" onclick="downloadMinutes()">💾 下載會議紀錄 DOCX</button>
-        <button id="downloadTranscriptBtn" onclick="downloadTranscript()" style="display:none;">📝 下載逐字稿 DOCX</button>
+        <button onclick="downloadOutput()">💾 下載 DOCX (含原生方程式)</button>
+        <button onclick="copyOutput()">📋 複製 HTML 原始碼</button>
       </div>
     </div>
   </div>
 </div>
 
+<!-- Poe Token 餘額小角落 -->
+<div class="poe-token-widget" id="poeTokenWidget" title="點擊重新查詢 Poe Token 餘額">
+  <div class="pt-title">⚡ POE TOKEN</div>
+  <div class="pt-body">
+    <div class="pt-value" id="poeTokenValue">查詢中...</div>
+    <div class="pt-sub" id="poeTokenSub">GET /usage/current_balance</div>
+    <div class="pt-error" id="poeTokenErr" style="display:none;"></div>
+  </div>
+</div>
+
+<script>
+// === Poe Token 餘額查詢 ===
+async function fetchPoeTokenBalance() {
+  const apiKey = (document.getElementById('apiKey').value || '').trim();
+  const valEl = document.getElementById('poeTokenValue');
+  const subEl = document.getElementById('poeTokenSub');
+  const errEl = document.getElementById('poeTokenErr');
+
+  if (!apiKey) {
+    valEl.textContent = '未設定 API Key';
+    subEl.textContent = '請先於左側填寫 Poe API Key';
+    errEl.style.display = 'none';
+    return;
+  }
+
+  valEl.textContent = '查詢中... points';
+  subEl.textContent = 'GET /usage/current_balance';
+  errEl.style.display = 'none';
+
+  try {
+    const resp = await fetch('https://api.poe.com/usage/current_balance', {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + apiKey }
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      throw new Error('HTTP ' + resp.status + (txt ? ' - ' + txt.slice(0, 120) : ''));
+    }
+    const data = await resp.json();
+    // Poe 官方欄位為 current_point_balance；同時適配其他常見命名
+    let balance = null;
+    if (typeof data === 'object' && data !== null) {
+      const candidates = ['current_point_balance', 'current_balance', 'balance', 'remaining', 'tokens', 'credit', 'points'];
+      for (const k of candidates) {
+        if (k in data && typeof data[k] !== 'object') { balance = data[k]; break; }
+      }
+    } else if (typeof data === 'number') {
+      balance = data;
+    }
+    if (balance === null || balance === undefined) {
+      // 無法匹配時顯示原始 JSON 鍋要，避免 [object Object]
+      balance = '(未知欄位) ' + JSON.stringify(data).slice(0, 80);
+    }
+    let display, usdText = '';
+    if (typeof balance === 'number') {
+      display = balance.toLocaleString('en-US', {maximumFractionDigits: 2}) + ' pts';
+      // Poe 官方換算：1M points = $30 USD（pre-purchase rate）
+      const usd = balance * 30 / 1_000_000;
+      usdText = ' ≈ $' + usd.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    } else {
+      display = String(balance);
+    }
+    valEl.textContent = display + usdText;
+    const ts = new Date().toLocaleTimeString('zh-HK');
+    subEl.textContent = '更新：' + ts + ' · 1M pts = $30';
+  } catch (err) {
+    valEl.textContent = '查詢失敗';
+    errEl.style.display = 'block';
+    errEl.textContent = err.message;
+    subEl.textContent = '可點擊此卡片重試';
+  }
+}
+
+document.getElementById('poeTokenWidget').addEventListener('click', fetchPoeTokenBalance);
+// 頁面載入後自動查詢一次
+window.addEventListener('load', () => setTimeout(fetchPoeTokenBalance, 600));
+</script>
+
+<script>
+// === 快捷設定標籤互動 ===
+const PRESET_DEFAULTS = {
+  refMode: false,
+  qTypes: [{name: '選擇題', count: 5}, {name: '短答題', count: 5}, {name: '長答題', count: 2}],
+  difficulty: '由淺入深',
+  options: ['附答案', '附解析']
+};
+
+function applyPresetDefaults() {
+  // 參照模式
+  document.getElementById('refModeCheck').checked = PRESET_DEFAULTS.refMode;
+  updateRefMode();
+  // 題型
+  document.querySelectorAll('#qTypeTags .qtype-item').forEach(item => {
+    const tag = item.querySelector('.tag');
+    const val = tag.dataset.val;
+    const def = PRESET_DEFAULTS.qTypes.find(q => q.name === val);
+    if (def) {
+      tag.classList.add('active');
+      item.querySelector('.qcount').style.display = 'inline-flex';
+      item.querySelector('.qc-input').value = def.count;
+    } else {
+      tag.classList.remove('active');
+      item.querySelector('.qcount').style.display = 'none';
+    }
+  });
+  // 難度
+  document.querySelectorAll('#difficultyTags .tag').forEach(t => {
+    t.classList.toggle('active', t.dataset.val === PRESET_DEFAULTS.difficulty);
+  });
+  // 附加選項
+  document.querySelectorAll('#optionTags .tag').forEach(t => {
+    t.classList.toggle('active', PRESET_DEFAULTS.options.includes(t.dataset.val));
+  });
+  syncRequirements();
+}
+
+function updateRefMode() {
+  const on = document.getElementById('refModeCheck').checked;
+  document.getElementById('refModeHint').style.display = on ? 'block' : 'none';
+  document.getElementById('customBlock').classList.toggle('disabled', on);
+  document.querySelectorAll('#difficultyTags, #optionTags').forEach(b => {
+    b.closest('.preset-block').classList.toggle('disabled', on);
+  });
+}
+
+function getActiveQTypes() {
+  const result = [];
+  document.querySelectorAll('#qTypeTags .qtype-item').forEach(item => {
+    const tag = item.querySelector('.tag');
+    if (tag.classList.contains('active')) {
+      const count = parseInt(item.querySelector('.qc-input').value, 10) || 0;
+      result.push({name: tag.dataset.val, count: count});
+    }
+  });
+  return result;
+}
+
+function getActiveValues(rowId) {
+  return Array.from(document.querySelectorAll('#' + rowId + ' .tag.active'))
+    .map(t => t.dataset.val);
+}
+
+function syncRequirements() {
+  const reqEl = document.getElementById('requirements');
+  // 手動模式下不自動覆寫
+  if (reqEl.dataset.manual === '1') return;
+
+  const refMode = document.getElementById('refModeCheck').checked;
+
+  if (refMode) {
+    reqEl.value = '請嚴格參照已上傳的「過往工作紙（格式參考）」之題型配置、題數比例、難度分佈、分題分數與排版風格，生成一份相同結構的新工作紙。保持原有的題型組合與配分方式，僅替換為本次指定的新課題內容；並附上完整教師答案與解析。';
+    updateQTotal();
+    return;
+  }
+
+  const qTypes = getActiveQTypes();
+  const difficulty = getActiveValues('difficultyTags')[0] || '';
+  const opts = getActiveValues('optionTags');
+
+  const parts = [];
+  if (qTypes.length) {
+    const valid = qTypes.filter(q => q.count > 0);
+    if (valid.length) {
+      const desc = valid.map(q => `${q.count} 題${q.name}`).join('、');
+      const total = valid.reduce((s, q) => s + q.count, 0);
+      parts.push(`包括 ${desc}（共 ${total} 題）`);
+    }
+  }
+  if (difficulty) parts.push(`難度${difficulty}`);
+  if (opts.length) parts.push(opts.join('、'));
+
+  reqEl.value = parts.join('；');
+  updateQTotal();
+}
+
+function updateQTotal() {
+  const qTypes = getActiveQTypes();
+  const total = qTypes.reduce((s, q) => s + q.count, 0);
+  const el = document.getElementById('qTotal');
+  if (qTypes.length === 0) {
+    el.textContent = '尚未選擇題型';
+    el.style.color = '#999';
+  } else {
+    el.textContent = `共 ${total} 題`;
+    el.style.color = total > 0 ? '#c41e3a' : '#999';
+  }
+}
+
+// 參照模式開關
+document.getElementById('refModeCheck').addEventListener('change', () => {
+  document.getElementById('requirements').dataset.manual = '';
+  updateRefMode();
+  syncRequirements();
+});
+// 點擊整列文字也可切換（label 已處理 toggle 本體，此為額外便利）
+document.querySelector('.preset-ref .preset-label').addEventListener('click', e => {
+  if (e.target.closest('.preset-toggle')) return; // 點到 toggle 本體由 label 處理
+  const cb = document.getElementById('refModeCheck');
+  cb.checked = !cb.checked;
+  cb.dispatchEvent(new Event('change'));
+});
+
+// 題型標籤點擊：啟用/停用 + 顯示題數控件
+document.getElementById('qTypeTags').addEventListener('click', e => {
+  const tag = e.target.closest('.tag');
+  if (!tag) return;
+  const item = tag.closest('.qtype-item');
+  const qcount = item.querySelector('.qcount');
+  tag.classList.toggle('active');
+  qcount.style.display = tag.classList.contains('active') ? 'inline-flex' : 'none';
+  document.getElementById('requirements').dataset.manual = '';
+  syncRequirements();
+});
+
+// 題數 +/- 按鈕與手動輸入
+document.getElementById('qTypeTags').addEventListener('click', e => {
+  const btn = e.target.closest('.qc-btn');
+  if (!btn) return;
+  const item = btn.closest('.qtype-item');
+  const input = item.querySelector('.qc-input');
+  const delta = parseInt(btn.dataset.delta, 10);
+  let v = parseInt(input.value, 10) || 0;
+  v = Math.max(0, Math.min(99, v + delta));
+  input.value = v;
+  document.getElementById('requirements').dataset.manual = '';
+  syncRequirements();
+});
+document.getElementById('qTypeTags').addEventListener('input', e => {
+  if (!e.target.classList.contains('qc-input')) return;
+  document.getElementById('requirements').dataset.manual = '';
+  syncRequirements();
+});
+
+// 難度、附加選項
+document.querySelectorAll('#difficultyTags, #optionTags').forEach(row => {
+  const single = row.dataset.single === '1';
+  row.addEventListener('click', e => {
+    const btn = e.target.closest('.tag');
+    if (!btn) return;
+    if (single) {
+      row.querySelectorAll('.tag').forEach(t => t.classList.remove('active'));
+      btn.classList.add('active');
+    } else {
+      btn.classList.toggle('active');
+    }
+    document.getElementById('requirements').dataset.manual = '';
+    syncRequirements();
+  });
+});
+
+// textarea 手動編輯保護
+document.getElementById('requirements').addEventListener('focus', () => {
+  document.getElementById('requirements').dataset.manual = '1';
+});
+
+// 重設
+document.getElementById('presetReset').addEventListener('click', () => {
+  document.getElementById('requirements').dataset.manual = '';
+  applyPresetDefaults();
+  if (typeof log === 'function') log('↺ 已重設快捷設定為預設值', 'info');
+});
+
+// 初始化
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', applyPresetDefaults);
+} else {
+  applyPresetDefaults();
+}
+</script>
+
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-let generatedMinutesHtml = '';
-let generatedTranscriptHtml = '';
-let correctedTranscriptText = '';
-let meetingNameGlobal = '';
-let outputTranscriptChecked = false;
-
-const STT_CONFIGS = {
-  'qwen': {
-    endpoint: '',
-    keyLabel: '',
-    model: 'qwen3.5-omni-plus',
-    needsKey: false
-  }
-};
+let generatedContent = '';
+let outputFormat = 'docx';
 
 const MODEL_HINTS = {
-  'qwen3.7-plus': {
-    text: 'Qwen3.7-Plus：阿里 Qwen 系列模型，中文能力較強，透過 POE API 調用。如遇 429 錯誤請稍後重試。',
+  'qwen3.6-plus': {
+    text: 'qwen3.6-plus：阿里巴巴通義千問 3.6 Plus，擅長中文理解與生成，適合語文、人文科目工作紙。',
+    warning: false
+  },
+  'glm-5.2-el': {
+    text: 'glm-5.2-el：智譜 GLM-5.2 EL 模型，推理能力強，適合數理、邏輯題目生成。',
+    warning: false
+  },
+  'deepseek-v4-pro-el': {
+    text: 'deepseek-v4-pro-el：DeepSeek V4 Pro EL，深度推理與編碼能力出色，適合 ICT、人工智能、數學延伸等科目。',
     warning: false
   }
 };
@@ -343,7 +792,7 @@ const MODEL_HINTS = {
 function getModelHint(model) {
   const modelKey = Object.keys(MODEL_HINTS).find(key => model.toLowerCase().includes(key));
   return MODEL_HINTS[modelKey] || {
-    text: '免費模型可能有速率限制，如遇 429 錯誤請稍後重試。',
+    text: 'Poe 平台模型，如遇速率限制請稍後重試。',
     warning: false
   };
 }
@@ -359,13 +808,6 @@ function updateModelHint() {
 document.getElementById('model').addEventListener('change', updateModelHint);
 updateModelHint();
 
-function updateSttUI() {
-  // STT 固定為 qwen3.5-omni-plus，所有欄位隱藏，直接使用 POE API
-  document.getElementById('sttEndpointGroup').classList.add('hidden');
-  document.getElementById('sttKeyGroup').classList.add('hidden');
-  document.getElementById('sttModelGroup').classList.add('hidden');
-}
-
 // 文件列表顯示
 ['refFiles', 'formatFiles'].forEach(id => {
   document.getElementById(id).addEventListener('change', e => {
@@ -375,25 +817,6 @@ function updateSttUI() {
     Array.from(e.target.files).forEach(f => {
       list.innerHTML += `<div>✓ ${f.name} (${(f.size/1024).toFixed(1)} KB)</div>`;
     });
-  });
-});
-
-document.getElementById('audioFile').addEventListener('change', e => {
-  const list = document.getElementById('audioFileList');
-  list.innerHTML = '';
-  Array.from(e.target.files).forEach(f => {
-    list.innerHTML += `<div>🎵 ${f.name} (${(f.size/1024/1024).toFixed(2)} MB)</div>`;
-  });
-
-  const ext = e.target.files[0]?.name.split('.').pop().toLowerCase();
-  document.getElementById('audioFormatHint').style.display = (ext === 'aac') ? 'block' : 'none';
-});
-
-document.getElementById('transcriptFile').addEventListener('change', e => {
-  const list = document.getElementById('transcriptFileList');
-  list.innerHTML = '';
-  Array.from(e.target.files).forEach(f => {
-    list.innerHTML += `<div>📄 ${f.name} (${(f.size/1024).toFixed(1)} KB)</div>`;
   });
 });
 
@@ -411,11 +834,11 @@ function setProgress(pct) {
 // 提取文件文本
 async function extractFileContent(file) {
   const ext = file.name.split('.').pop().toLowerCase();
-
+  
   if (ext === 'txt') {
     return await file.text();
   }
-
+  
   if (ext === 'pdf') {
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
@@ -427,226 +850,32 @@ async function extractFileContent(file) {
     }
     return text;
   }
-
+  
   if (ext === 'docx') {
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({arrayBuffer});
     return result.value;
   }
-
+  
   if (['png','jpg','jpeg'].includes(ext)) {
     return `[圖片檔案: ${file.name}]`;
   }
-
+  
   return '';
 }
 
-// 語音轉文字（使用 qwen3.5-omni-plus 透過 POE 多模態）
-async function transcribeAudio(file, sttConfig) {
-  const apiBaseUrl = document.getElementById('apiBaseUrl').value.trim().replace(/\/+$/, '');
-  const apiKey = document.getElementById('apiKey').value.trim();
-  const model = sttConfig.model || 'qwen3.5-omni-plus';
-
-  if (!apiKey) throw new Error('請輸入 POE API Key');
-
-  // 將音訊檔轉為 base64
-  const buffer = await file.arrayBuffer();
-  const mimeType = file.type || 'audio/mp4';
-  const base64 = btoa(
-    new Uint8Array(buffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-  );
-  const dataUri = `data:${mimeType};base64,${base64}`;
-
-  const systemPrompt = `你是一個專業的語音轉文字助手。請將提供的音訊內容轉錄為繁體中文文字。
-注意：
-- 會議可能包含廣東話、普通話及英語混合
-- 請完整轉錄所有聽到的內容
-- 不要加入任何解釋或摘要，只輸出轉錄文字`;
-
-  const maxRetries = 3;
-  let response;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    response = await fetch(`${apiBaseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + apiKey,
-        'Content-Type': 'application/json',
-        'X-Title': 'WCBT AI Meeting Minutes Generator'
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: systemPrompt },
-              { type: 'image_url', image_url: { url: dataUri } }
-            ]
-          }
-        ]
-      })
-    });
-
-    if (response.status === 429 && attempt < maxRetries) {
-      const wait = attempt * 8;
-      log(`⏳ STT API 速率限制 (429)，${wait} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`, 'thinking');
-      await new Promise(r => setTimeout(r, wait * 1000));
-      continue;
-    }
-    break;
-  }
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`STT API 錯誤 ${response.status}: ${err}`);
-  }
-
-  const result = await response.json();
-  return result.choices?.[0]?.message?.content || '';
-}
-
-// AI 校正逐字稿
-async function correctTranscript(rawTranscript, apiBaseUrl, apiKey, model) {
-  if (!rawTranscript || !rawTranscript.trim()) return '';
-
-  const systemPrompt = `你是一位專業的會議記錄整理員。請將以下語音轉文字結果整理成清楚、可閱讀的繁體中文逐字稿。
-
-要求：
-1. 修正明顯的語音辨識錯字，補充適當標點符號
-2. 如聽到不同說話者，請以「說話者 A：...」方式分段標示
-3. 保留原意，不要刪減重要內容
-4. 輸出純文本，不要加入任何解釋或前言`;
-
-  const response = await fetchWithRetry(`${apiBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + apiKey,
-      'Content-Type': 'application/json',
-      'X-Title': 'WCBT AI Meeting Minutes Generator'
-    },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        {role: 'system', content: systemPrompt},
-        {role: 'user', content: rawTranscript}
-      ]
-    })
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`逐字稿校正 API 錯誤 ${response.status}: ${err}`);
-  }
-
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || '';
-}
-
-async function fetchWithRetry(url, options, maxRetries = 5) {
-  let response;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    response = await fetch(url, options);
-    if (response.status === 429 && attempt < maxRetries) {
-      const wait = attempt * 5;
-      log(`⏳ API 速率限制 (429)，${wait} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`, 'thinking');
-      await new Promise(r => setTimeout(r, wait * 1000));
-      continue;
-    }
-    break;
-  }
-  return response;
-}
-
-// 串流生成會議紀錄
-async function streamGenerateMinutes(prompt, apiBaseUrl, apiKey, model) {
-  const response = await fetchWithRetry(`${apiBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + apiKey,
-      'Content-Type': 'application/json',
-      'X-Title': 'WCBT AI Meeting Minutes Generator'
-    },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        {role: 'system', content: prompt.system},
-        {role: 'user', content: prompt.user}
-      ],
-      stream: true
-    })
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`API 錯誤 ${response.status}: ${err}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let fullContent = '';
-  let buffer = '';
-  let charCount = 0;
-
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, {stream: true});
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta?.content || '';
-          if (delta) {
-            fullContent += delta;
-            charCount += delta.length;
-            if (charCount % 200 < delta.length) {
-              log(`💭 已生成 ${charCount} 字...`, 'thinking');
-              setProgress(55 + Math.min(35, charCount / 100));
-            }
-          }
-        } catch(e) {}
-      }
-    }
-  }
-
-  return fullContent;
-}
-
-async function generateMinutes() {
+async function generateWorksheet() {
   const apiBaseUrl = document.getElementById('apiBaseUrl').value.trim().replace(/\/+$/, '');
   const apiKey = document.getElementById('apiKey').value.trim();
   const model = document.getElementById('model').value;
-  const sttProvider = document.getElementById('sttProvider').value;
-  const sttConfig = {
-    provider: sttProvider,
-    endpoint: document.getElementById('sttEndpoint').value.trim().replace(/\/+$/, ''),
-    apiKey: document.getElementById('sttApiKey').value.trim(),
-    model: document.getElementById('sttModel').value
-  };
-  const meetingName = document.getElementById('meetingName').value.trim();
-  const meetingDatetime = document.getElementById('meetingDatetime').value;
-  const meetingLocation = document.getElementById('meetingLocation').value.trim();
-  const meetingChair = document.getElementById('meetingChair').value.trim();
-  const meetingAttendees = document.getElementById('meetingAttendees').value.trim();
+  const grade = document.getElementById('grade').value;
+  const subject = document.getElementById('subject').value;
+  const topic = document.getElementById('topic').value.trim();
   const requirements = document.getElementById('requirements').value.trim();
-  outputTranscriptChecked = document.getElementById('outputTranscript').checked;
-  meetingNameGlobal = meetingName || '會議紀錄';
 
-  if (!apiBaseUrl) { alert('請輸入 POE API Endpoint'); return; }
-  if (!apiKey) { alert('請輸入 POE API Key'); return; }
-  if (!meetingName) { alert('請輸入會議名稱'); return; }
-
-  const audioFile = document.getElementById('audioFile').files[0];
-  const transcriptFile = document.getElementById('transcriptFile').files[0];
-  // 使用 POE API，不需要獨立的 STT API Key
-  if (!audioFile && !transcriptFile) {
-    // 允許不上傳錄音或逐字稿，只按議程生成框架
-  }
+  if (!apiBaseUrl) { alert('請輸入 Poe API Endpoint'); return; }
+  if (!apiKey) { alert('請輸入 Poe API Key'); return; }
+  if (!topic) { alert('請輸入工作紙主題'); return; }
 
   const btn = document.getElementById('generateBtn');
   btn.disabled = true;
@@ -654,41 +883,32 @@ async function generateMinutes() {
   document.getElementById('progressArea').innerHTML = '';
   document.getElementById('previewArea').innerHTML = '<div style="color:#999;text-align:center;padding:40px;">生成中，請稍候...</div>';
   document.getElementById('downloadButtons').style.display = 'none';
-  document.getElementById('downloadTranscriptBtn').style.display = 'none';
-  generatedMinutesHtml = '';
-  generatedTranscriptHtml = '';
-  correctedTranscriptText = '';
 
   try {
-    log('開始處理會議紀錄請求...', 'step');
+    log('開始處理請求...', 'step');
     const modelHint = getModelHint(model);
-    log('文字模型提醒：' + modelHint.text, modelHint.warning ? 'thinking' : 'info');
-    if (transcriptFile) {
-      log('使用已上傳逐字稿生成會議紀錄', 'info');
-    } else if (audioFile && sttProvider !== 'none') {
-      log(`語音服務：${sttProvider} / ${sttConfig.model}`, 'info');
-    }
+    log('Model 提醒：' + modelHint.text, modelHint.warning ? 'thinking' : 'info');
     setProgress(5);
 
     // 讀取參考文件
     let refContent = '';
     const refFiles = document.getElementById('refFiles').files;
     if (refFiles.length > 0) {
-      log(`📚 正在讀取 ${refFiles.length} 份議程及參考資料...`, 'step');
+      log(`📚 正在讀取 ${refFiles.length} 個參考教材...`, 'step');
       for (const f of refFiles) {
         log(`  · 解析 ${f.name}`, 'info');
         const txt = await extractFileContent(f);
         refContent += `\n\n=== ${f.name} ===\n${txt.substring(0, 8000)}`;
       }
-      log('✓ 參考資料讀取完成', 'success');
+      log('✓ 參考教材讀取完成', 'success');
     }
-    setProgress(15);
+    setProgress(20);
 
     // 讀取格式參考
     let formatContent = '';
     const formatFiles = document.getElementById('formatFiles').files;
     if (formatFiles.length > 0) {
-      log(`📄 正在讀取 ${formatFiles.length} 份過往會議紀錄格式參考...`, 'step');
+      log(`📄 正在讀取 ${formatFiles.length} 個格式參考...`, 'step');
       for (const f of formatFiles) {
         log(`  · 解析 ${f.name}`, 'info');
         const txt = await extractFileContent(f);
@@ -696,87 +916,117 @@ async function generateMinutes() {
       }
       log('✓ 格式參考讀取完成', 'success');
     }
-    setProgress(25);
+    setProgress(35);
 
-    // 處理逐字稿：優先使用上傳的逐字稿，否則進行語音轉文字
-    let rawTranscript = '';
-    correctedTranscriptText = '';
-
-    if (transcriptFile) {
-      log(`📄 讀取已上傳逐字稿：${transcriptFile.name}...`, 'step');
-      const transcriptText = await extractFileContent(transcriptFile);
-      correctedTranscriptText = transcriptText.substring(0, 20000);
-      log(`✓ 逐字稿讀取完成，共 ${correctedTranscriptText.length} 字符`, 'success');
-      setProgress(55);
-
-      if (outputTranscriptChecked) {
-        generatedTranscriptHtml = buildTranscriptHtml(meetingName, meetingDatetime, correctedTranscriptText);
-        log('✓ 已準備逐字稿輸出', 'success');
-      }
-    } else if (audioFile) {
-      log(`🎙️ 開始語音轉文字：${audioFile.name}（使用 qwen3.5-omni-plus 透過 POE）...`, 'step');
-      if (audioFile.size > 25 * 1024 * 1024) {
-        log('⚠️ 錄音檔案超過 25MB，處理可能較慢，請耐心等候...', 'thinking');
-      }
-      rawTranscript = await transcribeAudio(audioFile, sttConfig);
-      log(`✓ 語音轉文字完成，共 ${rawTranscript.length} 字符`, 'success');
-      setProgress(40);
-
-      log('🧠 正在使用 AI 校正逐字稿...', 'step');
-      correctedTranscriptText = await correctTranscript(rawTranscript, apiBaseUrl, apiKey, model);
-      log(`✓ 逐字稿校正完成，共 ${correctedTranscriptText.length} 字符`, 'success');
-      setProgress(55);
-
-      if (outputTranscriptChecked) {
-        generatedTranscriptHtml = buildTranscriptHtml(meetingName, meetingDatetime, correctedTranscriptText);
-        log('✓ 已準備逐字稿輸出', 'success');
-      }
-    } else {
-      log('ℹ️ 未上傳錄音或逐字稿，將只根據議程及要求生成會議紀錄框架', 'thinking');
-      setProgress(55);
-    }
-
-    // 生成會議紀錄
-    const dateStr = meetingDatetime ? new Date(meetingDatetime).toLocaleString('zh-HK') : '';
-
-    const systemPrompt = `你是香港教育工作者聯會黃楚標中學的資深行政助理，專責撰寫正式會議紀錄。請根據提供的資料生成結構清晰、語氣得體、適合存檔的會議紀錄。
+    // 建立 prompt
+    const systemPrompt = `你是香港教育工作者聯會黃楚標中學的資深教師助理，專責協助老師製作高質素的中學工作紙。請根據老師提供的資料，生成符合香港中學課程的工作紙。
 
 要求：
-1. 使用繁體中文，語氣正式、客觀
-2. 會議紀錄應包含：會議名稱、日期時間、地點、主席、出席者、議程項目、討論內容摘要、議決/共識、行動項目（Action Items）、下次會議安排
-3. 如果有錄音逐字稿，請根據內容歸納重點，不要逐句抄錄；如果沒有錄音，請根據議程及要求生成合適的紀錄框架
-4. 保留過往會議紀錄的格式風格（如有上傳格式參考）
-5. 行動項目需以表格呈現，包含：事項、負責人、完成期限
-6. 輸出格式為純 HTML（包含適當 <style> 美化），不要使用 markdown
-7. HTML 應包含學校名稱、標題、會議資料區、議程區、討論摘要區、行動事項區
-8. 使用適合列印的版面（A4，正體字）`;
+1. 使用繁體中文（除英文科外）
+2. 內容嚴謹、符合 ${grade} 程度
+3. 包含工作紙標題、學校名稱、班別/姓名/日期欄、清晰題號、適當分數
+4. 必須包含完整答案及解析（在工作紙末段「教師參考答案」部分）
+5. 輸出格式為純 HTML（包含適當的 <style> 美化），不要使用 markdown
+6. HTML 應包含：學校標題、工作紙資訊區、題目區、答案區（用 page-break-before:always 分頁）
+7. 使用適合列印的版面（A4，正體字）
 
-    const userPrompt = `請為以下會議生成會議紀錄：
+【數學公式格式 — 非常重要】
+8. 所有數學公式、化學方程式、物理符號必須使用 LaTeX 語法：
+   - 行內公式用單一美元符號包圍：$x^2 + y^2 = r^2$、$\\frac{a}{b}$、$\\sqrt{2}$
+   - 獨立顯示公式用雙美元符號包圍：
+     $$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$
+   - 常見用法：上下標 $x^{n}$、$a_{i}$；分式 $\\frac{分子}{分母}$；根號 $\\sqrt[n]{x}$；希臘字母 $\\alpha \\beta \\gamma \\pi \\theta$；不等號 $\\leq \\geq \\neq$；求和 $\\sum_{i=1}^{n}$；極限 $\\lim_{x \\to 0}$；矩陣 $\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}$
+   - 單位、變數、簡單符號也用 LaTeX：$\\text{m/s}$、$v = u + at$、$\\Delta E = mc^2$
+9. 不要用 Unicode 數學符號（如 ² ³ √ ∫ ∑）替代 LaTeX；不要用 OMML 或 MathML
+10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫`;
 
-【會議名稱】${meetingName}
-【日期時間】${dateStr || '（未指定）'}
-【地點】${meetingLocation || '（未指定）'}
-【主席】${meetingChair || '（未指定）'}
-【出席者】${meetingAttendees || '（未指定）'}
-【具體要求】${requirements || '請設計標準會議紀錄格式'}
+    const userPrompt = `請為以下要求生成工作紙：
 
-${refContent ? '【本次會議議程及參考資料】' + refContent : ''}
+【年級】${grade}
+【科目】${subject}
+【課題】${topic}
+【具體要求】${requirements || '請設計適當題型與題數'}
 
-${formatContent ? '【過往會議紀錄格式參考（請仿照排版風格）】' + formatContent : ''}
+${refContent ? '【參考教材內容】' + refContent : ''}
 
-${correctedTranscriptText ? '【會議錄音逐字稿（經 AI 校正）】\n' + correctedTranscriptText.substring(0, 20000) : ''}
+${formatContent ? '【格式參考（請仿照排版風格）】' + formatContent : ''}
 
-請輸出完整的 HTML 文件（從 <!DOCTYPE html> 到 </html>），包含完整會議紀錄內容。`;
+請輸出完整的 HTML 文件（從 <!DOCTYPE html> 到 </html>），包含完整工作紙內容及教師答案。`;
 
-    log('🧠 連接 POE API (' + model + ') 生成會議紀錄...', 'step');
+    log('🧠 連接 Poe API (' + model + ')...', 'step');
+    setProgress(45);
 
-    const fullContent = await streamGenerateMinutes(
-      {system: systemPrompt, user: userPrompt},
-      apiBaseUrl, apiKey, model
-    );
+    const maxRetries = 5;
+    let response;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      response = await fetch(`${apiBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + apiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            {role: 'system', content: systemPrompt},
+            {role: 'user', content: userPrompt}
+          ],
+          stream: true
+        })
+      });
+
+      if (response.status === 429 && attempt < maxRetries) {
+        const wait = attempt * 5;
+        log(`⏳ API 速率限制 (429)，${wait} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`, 'thinking');
+        await new Promise(r => setTimeout(r, wait * 1000));
+        continue;
+      }
+      break;
+    }
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`API 錯誤 ${response.status}: ${err}`);
+    }
+
+    log('✓ 已連接，AI 開始生成...', 'success');
+    setProgress(55);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let buffer = '';
+    let charCount = 0;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const json = JSON.parse(data);
+            const delta = json.choices?.[0]?.delta?.content || '';
+            if (delta) {
+              fullContent += delta;
+              charCount += delta.length;
+              if (charCount % 200 < delta.length) {
+                log(`💭 已生成 ${charCount} 字...`, 'thinking');
+                setProgress(55 + Math.min(35, charCount / 100));
+              }
+            }
+          } catch(e) {}
+        }
+      }
+    }
 
     log(`✓ 生成完成，共 ${fullContent.length} 字`, 'success');
-    setProgress(95);
+    setProgress(90);
 
     // 提取 HTML
     let htmlMatch = fullContent.match(/```html\s*([\s\S]*?)```/);
@@ -784,8 +1034,8 @@ ${correctedTranscriptText ? '【會議錄音逐字稿（經 AI 校正）】\n' +
     if (!htmlContent.includes('<!DOCTYPE') && !htmlContent.includes('<html')) {
       htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:"Microsoft JhengHei";padding:30px;line-height:1.8;}</style></head><body>${htmlContent}</body></html>`;
     }
-
-    generatedMinutesHtml = htmlContent;
+    
+    generatedContent = htmlContent;
 
     // 預覽
     const preview = document.getElementById('previewArea');
@@ -793,100 +1043,90 @@ ${correctedTranscriptText ? '【會議錄音逐字稿（經 AI 校正）】\n' +
     iframe.style.cssText = 'width:100%;height:480px;border:none;';
     preview.innerHTML = '';
     preview.appendChild(iframe);
-    iframe.contentDocument.open();
-    iframe.contentDocument.write(htmlContent);
-    iframe.contentDocument.close();
+    const idoc = iframe.contentDocument;
+    idoc.open();
+    idoc.write(htmlContent);
+    idoc.close();
+    // 注入 MathJax 渲染 LaTeX 公式
+    try {
+      const cfg = idoc.createElement('script');
+      cfg.text = 'window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" } };';
+      idoc.head.appendChild(cfg);
+      const mj = idoc.createElement('script');
+      mj.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js';
+      idoc.head.appendChild(mj);
+    } catch(e) { console.warn('預覽 MathJax 注入失敗', e); }
 
-    log('✅ 會議紀錄完成！可下載 DOCX 文件', 'success');
+    log('✅ 完成！點擊「下載文件」即可生成含 Word 原生方程式的 DOCX', 'success');
     setProgress(100);
-
     document.getElementById('downloadButtons').style.display = 'flex';
-    if (outputTranscriptChecked && correctedTranscriptText) {
-      document.getElementById('downloadTranscriptBtn').style.display = 'block';
-    }
 
   } catch (err) {
     log('❌ 錯誤: ' + err.message, 'error');
     console.error(err);
-    document.getElementById('previewArea').innerHTML = `<div style="color:#c41e3a;text-align:center;padding:40px;">生成失敗：${err.message}</div>`;
   } finally {
     btn.disabled = false;
-    btn.textContent = '🚀 開始生成會議紀錄';
+    btn.textContent = '🚀 開始生成工作紙';
   }
 }
 
-function buildTranscriptHtml(meetingName, meetingDatetime, transcriptText) {
-  const dateStr = meetingDatetime ? new Date(meetingDatetime).toLocaleString('zh-HK') : '';
-  const escapedTranscript = transcriptText
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br>');
-
-  return `<!DOCTYPE html>
-<html lang="zh-HK">
-<head>
-<meta charset="UTF-8">
-<style>
-  body { font-family: "Microsoft JhengHei", "PingFang TC", sans-serif; padding: 30px; line-height: 1.8; }
-  h1 { text-align: center; color: #2a5298; }
-  .meta { margin: 20px 0; padding: 15px; background: #f0f4ff; border-radius: 8px; }
-  .transcript { white-space: normal; }
-</style>
-</head>
-<body>
-  <h1>會議逐字稿</h1>
-  <div class="meta">
-    <strong>會議名稱：</strong>${meetingName}<br>
-    <strong>日期時間：</strong>${dateStr}<br>
-    <strong>備註：</strong>本逐字稿經 AI 語音辨識及自動校正，建議再作人工覆核。
-  </div>
-  <div class="transcript">${escapedTranscript}</div>
-</body>
-</html>`;
+function downloadOutput() {
+  if (!generatedContent) return;
+  const grade = document.getElementById('grade').value;
+  const subject = document.getElementById('subject').value;
+  const topic = document.getElementById('topic').value;
+  const filename = `${grade}_${subject}_${topic}_工作紙`;
+  downloadDocx(filename);
 }
 
-function downloadMinutes() {
-  if (!generatedMinutesHtml) return;
-  const filename = sanitizeFilename(`${meetingNameGlobal}_會議紀錄`);
-  downloadDocx(filename, generatedMinutesHtml, '會議紀錄');
-}
-
-function downloadTranscript() {
-  if (!generatedTranscriptHtml) return;
-  const filename = sanitizeFilename(`${meetingNameGlobal}_逐字稿_AI校正`);
-  downloadDocx(filename, generatedTranscriptHtml, '逐字稿');
-}
-
-function sanitizeFilename(name) {
-  return name.replace(/[<>:"/\\|?*]+/g, '_').replace(/[\s]+/g, '_');
-}
-
-async function downloadDocx(filename, html, docType) {
+async function downloadDocx(filename) {
   try {
-    const blob = await buildStyledDocxBlob(html);
+    log('⚙️ 正在轉換為 Word 格式（LaTeX → 原生方程式 OMML）...', 'step');
+    const blob = await buildDocxBlob(generatedContent);
     saveAs(blob, filename + '.docx');
-    log(`💾 已下載 ${docType} DOCX 文件`, 'success');
+    log('💾 已下載 DOCX 文件（含 Word 原生方程式，可點擊編輯）', 'success');
   } catch (err) {
     log('❌ DOCX 下載失敗: ' + err.message, 'error');
+    console.error(err);
   }
 }
 
-async function buildStyledDocxBlob(html) {
+async function buildDocxBlob(html) {
   if (typeof JSZip === 'undefined') {
     throw new Error('JSZip 未載入，請確認網絡連線後重新開啟此工具');
   }
+  if (typeof temml === 'undefined') {
+    log('⚠️ temml 函式庫未載入，公式將以純文字顯示', 'thinking');
+  }
+
+  log('📄 解析 HTML 結構...', 'info');
+  const bodyWml = htmlToWml(html);
+  log('🔢 轉換 LaTeX 公式為 Word 原生方程式 (OMML)...', 'info');
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+    `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ` +
+    `xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">` +
+    `<w:body>${bodyWml}` +
+    `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
+    `<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>` +
+    `<w:cols w:space="720"/><w:docGrid w:linePitch="360"/></w:sectPr>` +
+    `</w:body></w:document>`;
 
   const zip = new JSZip();
-  const wordHtml = prepareHtmlForWord(html);
-
-  zip.file('[Content_Types].xml', getDocxContentTypesXml());
-  zip.folder('_rels').file('.rels', getDocxRootRelsXml());
-
-  const wordFolder = zip.folder('word');
-  wordFolder.file('document.xml', getDocxDocumentXml());
-  wordFolder.file('afchunk.html', wordHtml);
-  wordFolder.folder('_rels').file('document.xml.rels', getDocxDocumentRelsXml());
+  zip.file('[Content_Types].xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+    `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+    `<Default Extension="xml" ContentType="application/xml"/>` +
+    `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
+    `</Types>`);
+  zip.folder('_rels').file('.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+    `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
+    `</Relationships>`);
+  zip.folder('word').file('document.xml', documentXml);
 
   return await zip.generateAsync({
     type: 'blob',
@@ -895,141 +1135,476 @@ async function buildStyledDocxBlob(html) {
   });
 }
 
-function prepareHtmlForWord(html) {
-  const cleanedHtml = String(html || '')
+// ============ HTML → WordprocessingML 轉換 ============
+function htmlToWml(html) {
+  const cleaned = String(html || '')
     .replace(/```html\s*/gi, '')
     .replace(/```/g, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '');
-  const parsedDoc = new DOMParser().parseFromString(cleanedHtml, 'text/html');
-
-  ensureWordHead(parsedDoc);
-  convertOptionGridsToTables(parsedDoc);
-  strengthenWordPrintableElements(parsedDoc);
-
-  if (!parsedDoc.documentElement.getAttribute('lang')) {
-    parsedDoc.documentElement.setAttribute('lang', 'zh-Hant-HK');
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+  const doc = new DOMParser().parseFromString(cleaned, 'text/html');
+  // 移除 head，只處理 body
+  let wml = '';
+  for (const node of Array.from(doc.body.childNodes)) {
+    wml += nodeToWml(node, {});
   }
-
-  return '<!DOCTYPE html>\n' + parsedDoc.documentElement.outerHTML;
+  return wml;
 }
 
-function ensureWordHead(doc) {
-  if (!doc.head) {
-    const head = doc.createElement('head');
-    doc.documentElement.insertBefore(head, doc.body || null);
+function nodeToWml(node, ctx) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return textToWmlRuns(node.textContent, ctx);
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  const tag = node.tagName.toLowerCase();
+
+  // 區塊級元素
+  if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'blockquote'].includes(tag)) {
+    return blockToWml(node, ctx, tag);
+  }
+  if (tag === 'br') {
+    return '<w:r><w:br/></w:r>';
+  }
+  if (tag === 'hr') {
+    return '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="999999"/></w:pBdr></w:pPr></w:p>';
+  }
+  if (tag === 'table') {
+    return tableToWml(node, ctx);
+  }
+  if (['ul', 'ol'].includes(tag)) {
+    return listToWml(node, ctx, tag);
+  }
+  if (tag === 'li') {
+    // li 直接被 ul/ol 處理；若單獨出現，當作段落
+    return blockToWml(node, ctx, 'p');
+  }
+  if (tag === 'img') {
+    return '<w:p><w:r><w:t xml:space="preserve">[圖片]</w:t></w:r></w:p>';
   }
 
-  if (!doc.querySelector('meta[charset]')) {
-    const meta = doc.createElement('meta');
-    meta.setAttribute('charset', 'UTF-8');
-    doc.head.insertBefore(meta, doc.head.firstChild);
+  // 行內元素
+  const newCtx = Object.assign({}, ctx);
+  if (tag === 'b' || tag === 'strong') newCtx.bold = true;
+  if (tag === 'i' || tag === 'em') newCtx.italic = true;
+  if (tag === 'u') newCtx.underline = true;
+  if (tag === 'sub') newCtx.subscript = true;
+  if (tag === 'sup') newCtx.superscript = true;
+  if (tag === 's' || tag === 'del' || tag === 'strike') newCtx.strike = true;
+  if (tag === 'span' || tag === 'font') {
+    const style = node.getAttribute('style') || '';
+    if (/font-weight\s*:\s*(bold|[6-9]00)/i.test(style)) newCtx.bold = true;
+    if (/font-style\s*:\s*italic/i.test(style)) newCtx.italic = true;
+    if (/text-decoration[^;]*underline/i.test(style)) newCtx.underline = true;
+    if (/text-decoration[^;]*line-through/i.test(style)) newCtx.strike = true;
+    const color = (style.match(/color\s*:\s*(#[0-9a-f]{3,6}|[a-z]+)/i) || [])[1];
+    if (color) newCtx.color = color;
+    const fs = (style.match(/font-size\s*:\s*(\d+)\s*(pt|px)/i) || []);
+    if (fs[1]) newCtx.fontSize = fs[2] === 'pt' ? parseInt(fs[1],10)*2 : Math.round(parseInt(fs[1],10)*1.5);
   }
 
-  const wordStyle = doc.createElement('style');
-  wordStyle.textContent = `
-    @page { size: A4; margin: 20mm; }
-    body {
-      font-family: "Microsoft JhengHei", "Heiti TC", "PingFang TC", sans-serif;
-      font-size: 11pt;
-      line-height: 1.6;
-      color: #000;
-    }
-    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; width: 100%; margin: 12px 0; }
-    th, td { vertical-align: top; border: 1px solid #666; padding: 6pt; }
-    th { background: #f0f4ff; font-weight: bold; }
-    .page-break { page-break-before: always; mso-page-break-before: always; }
-    .meta-box { background: #f0f4ff; padding: 10pt; border-radius: 6pt; margin-bottom: 12pt; }
-    h1 { font-size: 18pt; text-align: center; margin-bottom: 12pt; }
-    h2 { font-size: 14pt; color: #2a5298; margin-top: 14pt; margin-bottom: 6pt; border-bottom: 1px solid #2a5298; padding-bottom: 4pt; }
-    h3 { font-size: 12pt; margin-top: 10pt; margin-bottom: 4pt; }
-  `;
-  doc.head.appendChild(wordStyle);
+  let result = '';
+  for (const child of Array.from(node.childNodes)) {
+    result += nodeToWml(child, newCtx);
+  }
+  return result;
 }
 
-function convertOptionGridsToTables(doc) {
-  doc.querySelectorAll('.options-grid').forEach(grid => {
-    const items = Array.from(grid.children).filter(child => child.nodeType === Node.ELEMENT_NODE);
-    if (!items.length) return;
+function blockToWml(node, ctx, tag) {
+  const cls = (node.getAttribute('class') || '').toLowerCase();
+  const style = node.getAttribute('style') || '';
+  let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(style);
+  let pPr = '';
 
-    const table = doc.createElement('table');
-    table.className = 'options-grid-word';
-    table.setAttribute('role', 'presentation');
+  // 對齊
+  const align = (style.match(/text-align\s*:\s*(left|center|right|justify)/i) || [])[1];
+  let jc = '';
+  if (align) jc = '<w:jc w:val="' + align + '"/>';
+  if (/text-align\s*:\s*center/i.test(style) || /center/.test(cls)) jc = '<w:jc w:val="center"/>';
 
-    for (let i = 0; i < items.length; i += 2) {
-      const row = doc.createElement('tr');
-      for (let col = 0; col < 2; col++) {
-        const cell = doc.createElement('td');
-        const item = items[i + col];
-        cell.innerHTML = item ? item.innerHTML : '&nbsp;';
-        row.appendChild(cell);
+  // 標題字級與粗體
+  let sz = '', heading = false;
+  if (tag === 'h1') { sz = '<w:sz w:val="36"/><w:szCs w:val="36"/>'; heading = true; }
+  else if (tag === 'h2') { sz = '<w:sz w:val="30"/><w:szCs w:val="30"/>'; heading = true; }
+  else if (tag === 'h3') { sz = '<w:sz w:val="26"/><w:szCs w:val="26"/>'; heading = true; }
+  else if (tag === 'h4') { sz = '<w:sz w:val="24"/><w:szCs w:val="24"/>'; heading = true; }
+  else if (tag === 'h5' || tag === 'h6') { sz = '<w:sz w:val="22"/><w:szCs w:val="22"/>'; heading = true; }
+
+  let spacing = '';
+  if (heading) {
+    spacing = '<w:spacing w:before="160" w:after="80"/>';
+  } else if (tag === 'p') {
+    spacing = '<w:spacing w:after="120" w:line="320" w:lineRule="auto"/>';
+  }
+
+  pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + spacing + sz + '</w:pPr>';
+
+  const childCtx = heading ? Object.assign({}, ctx, { bold: true }) : ctx;
+
+  // 收集子節點 runs（可能含 display math 切分標記）
+  let runs = '';
+  for (const child of Array.from(node.childNodes)) {
+    runs += nodeToWml(child, childCtx);
+  }
+
+  // 切分 display math（標記 \u0001DMATH\u0001 ... \u0001ENDDMATH\u0001）
+  const parts = runs.split(/\u0001DMATH\u0001([\s\S]*?)\u0001ENDDMATH\u0001/);
+  let result = '';
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      const textRuns = parts[i];
+      if (textRuns && textRuns.trim()) {
+        result += '<w:p>' + pPr + textRuns + '</w:p>';
+      } else if (i === 0 && parts.length === 1) {
+        // 純空段落
+        result += '<w:p>' + pPr + '</w:p>';
       }
-      table.appendChild(row);
+    } else {
+      // display math - 獨立置中段落
+      result += '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120"/></w:pPr>' + parts[i] + '</w:p>';
     }
+  }
+  if (!result) result = '<w:p>' + pPr + '</w:p>';
+  return result;
+}
 
-    grid.replaceWith(table);
+function textToWmlRuns(text, ctx) {
+  if (!text) return '';
+  const runs = [];
+  // 匹配 $$...$$ 或 $...$（優先 $$）
+  const regex = /(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      runs.push(makeTextRun(text.slice(lastIndex, match.index), ctx));
+    }
+    const m = match[0];
+    if (m.startsWith('$$')) {
+      const latex = m.slice(2, -2).trim();
+      const omml = latexToOmml(latex, true);
+      // 用標記包圍，供 blockToWml 切分
+      runs.push('\u0001DMATH\u0001' + omml + '\u0001ENDDMATH\u0001');
+    } else {
+      const latex = m.slice(1, -1).trim();
+      const omml = latexToOmml(latex, false);
+      runs.push(omml);
+    }
+    lastIndex = match.index + m.length;
+  }
+  if (lastIndex < text.length) {
+    runs.push(makeTextRun(text.slice(lastIndex), ctx));
+  }
+  return runs.join('');
+}
+
+function makeTextRun(text, ctx) {
+  if (!text) return '';
+  const escaped = escapeXml(text);
+  const props = [];
+  if (ctx.bold) props.push('<w:b/>');
+  if (ctx.italic) props.push('<w:i/>');
+  if (ctx.underline) props.push('<w:u w:val="single"/>');
+  if (ctx.strike) props.push('<w:strike/>');
+  if (ctx.superscript) props.push('<w:vertAlign w:val="superscript"/>');
+  if (ctx.subscript) props.push('<w:vertAlign w:val="subscript"/>');
+  if (ctx.color) props.push('<w:color w:val="' + ctx.color.replace('#','') + '"/>');
+  if (ctx.fontSize) props.push('<w:sz w:val="' + ctx.fontSize + '"/><w:szCs w:val="' + ctx.fontSize + '"/>');
+  let rPr = props.length ? '<w:rPr>' + props.join('') + '</w:rPr>' : '';
+  // 處理文字內換行
+  if (text.indexOf('\n') >= 0) {
+    const segs = text.split('\n');
+    let out = '';
+    for (let i = 0; i < segs.length; i++) {
+      if (i > 0) out += '<w:r/><w:r><w:br/></w:r>';
+      if (segs[i]) out += '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(segs[i]) + '</w:t></w:r>';
+    }
+    return out;
+  }
+  return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escaped + '</w:t></w:r>';
+}
+
+function escapeXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function tableToWml(node, ctx) {
+  const rows = Array.from(node.querySelectorAll('tr'));
+  if (!rows.length) return '';
+  // 計算最大欄數
+  let maxCols = 1;
+  for (const r of rows) {
+    const c = r.querySelectorAll('td, th').length;
+    if (c > maxCols) maxCols = c;
+  }
+  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/>' +
+    '<w:tblBorders>' +
+    '<w:top w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:left w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:bottom w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:right w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:insideH w:val="single" w:sz="4" w:color="000000"/>' +
+    '<w:insideV w:val="single" w:sz="4" w:color="000000"/>' +
+    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
+  const tblGrid = '<w:tblGrid>' + Array(maxCols).fill('<w:gridCol w:w="' + Math.floor(9000/maxCols) + '"/>').join('') + '</w:tblGrid>';
+
+  let trWml = '';
+  for (const row of rows) {
+    const cells = Array.from(row.querySelectorAll('td, th'));
+    let tcWml = '';
+    for (const cell of cells) {
+      const isHeader = cell.tagName.toLowerCase() === 'th';
+      const cellCtx = Object.assign({}, ctx, { bold: ctx.bold || isHeader });
+      let cellContent = '';
+      for (const child of Array.from(cell.childNodes)) {
+        cellContent += nodeToWml(child, cellCtx);
+      }
+      // 確保至少一個段落
+      if (!cellContent || cellContent.indexOf('<w:p>') < 0) {
+        cellContent = '<w:p>' + cellContent + '</w:p>';
+      }
+      const tcPr = '<w:tcPr><w:tcW w:w="' + Math.floor(9000/maxCols) + '" w:type="dxa"/>' +
+        (isHeader ? '<w:shd w:val="clear" w:color="auto" w:fill="E8E8E8"/>' : '') +
+        '<w:vAlign w:val="top"/></w:tcPr>';
+      tcWml += '<w:tc>' + tcPr + cellContent + '</w:tc>';
+    }
+    trWml += '<w:tr>' + tcWml + '</w:tr>';
+  }
+  return '<w:tbl>' + tblPr + tblGrid + trWml + '</w:tbl>';
+}
+
+function listToWml(node, ctx, tag) {
+  let wml = '';
+  const items = Array.from(node.children).filter(c => c.tagName.toLowerCase() === 'li');
+  let idx = 1;
+  for (const item of items) {
+    const prefix = tag === 'ol' ? (idx + '. ') : '• ';
+    let content = '';
+    for (const child of Array.from(item.childNodes)) {
+      content += nodeToWml(child, ctx);
+    }
+    const pPr = '<w:pPr><w:ind w:left="480" w:hanging="360"/><w:spacing w:after="60"/></w:pPr>';
+    wml += '<w:p>' + pPr + makeTextRun(prefix, ctx) + content + '</w:p>';
+    idx++;
+  }
+  return wml;
+}
+
+// ============ LaTeX → MathML → OMML 轉換 ============
+const OMML_MATH_FUNCS = ['sin','cos','tan','sec','csc','cot','sinh','cosh','tanh','log','ln','lim','max','min','exp','arcsin','arccos','arctan','det','dim','gcd','inf','sup'];
+
+function latexToOmml(latex, displayMode) {
+  if (typeof temml === 'undefined') {
+    return makeTextRun('[公式: ' + latex + ']', { italic: true });
+  }
+  try {
+    const mathmlStr = temml.renderToString(latex, {
+      displayMode: displayMode,
+      throwOnError: false,
+      wrap: 'none'
+    });
+    const doc = new DOMParser().parseFromString(mathmlStr, 'application/xml');
+    let mathNode = doc.documentElement;
+    if (!mathNode || (mathNode.localName !== 'math' && mathNode.tagName !== 'math')) {
+      mathNode = doc.querySelector('math');
+    }
+    if (!mathNode) {
+      return makeTextRun('[公式轉換失敗: ' + latex + ']', { italic: true });
+    }
+    return mathmlToOmml(mathNode, displayMode);
+  } catch (e) {
+    console.warn('LaTeX→OMML 失敗:', latex, e);
+    return makeTextRun('[公式: ' + latex + ']', { italic: true });
+  }
+}
+
+function mathmlToOmml(mathNode, displayMode) {
+  const inner = convertMathNodes(Array.from(mathNode.childNodes));
+  if (displayMode) {
+    return '<m:oMathPara><m:oMathParaPr><m:jc m:val="center"/></m:oMathParaPr><m:oMath>' + inner + '</m:oMath></m:oMathPara>';
+  }
+  return '<m:oMath>' + inner + '</m:oMath>';
+}
+
+function convertMathNodes(nodes) {
+  let result = '';
+  for (const node of nodes) {
+    result += convertMathNode(node);
+  }
+  return result;
+}
+
+function getLocalTag(node) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return '';
+  return node.localName || (node.tagName || '').toLowerCase().replace(/^m:/, '');
+}
+
+function elementChildren(node) {
+  return Array.from(node.childNodes).filter(n => n.nodeType === Node.ELEMENT_NODE);
+}
+
+function convertMathNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent;
+    if (!text) return '';
+    // 純文字節點視為正體 run
+    return mRun(text, 'p');
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  const tag = getLocalTag(node);
+  const kids = elementChildren(node);
+
+  switch (tag) {
+    case 'math':
+      return convertMathNodes(Array.from(node.childNodes));
+    case 'mrow':
+    case 'mstyle':
+    case 'mpadded':
+    case 'mphantom':
+      if (tag === 'mphantom') return '';
+      return convertMathNodes(Array.from(node.childNodes));
+    case 'mi': {
+      const text = node.textContent;
+      const isFunc = OMML_MATH_FUNCS.includes(text);
+      return mRun(text, isFunc ? 'p' : 'i');
+    }
+    case 'mn':
+      return mRun(node.textContent, 'p');
+    case 'mo':
+      return mRun(node.textContent, 'p');
+    case 'mtext':
+    case 'ms':
+      return mRun(node.textContent, 'p');
+    case 'mspace':
+      return '';
+    case 'msup': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      return '<m:sSup><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
+        '<m:sup>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sup></m:sSup>';
+    }
+    case 'msub': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      return '<m:sSub><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
+        '<m:sub>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sub></m:sSub>';
+    }
+    case 'msubsup': {
+      if (kids.length < 3) return convertMathNodes(kids);
+      return '<m:sSubSup><m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e>' +
+        '<m:sub>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:sub>' +
+        '<m:sup>' + convertMathNodes(Array.from(kids[2].childNodes)) + '</m:sup></m:sSubSup>';
+    }
+    case 'mfrac': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      return '<m:f><m:num>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:num>' +
+        '<m:den>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:den></m:f>';
+    }
+    case 'msqrt': {
+      return '<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/>' +
+        '<m:e>' + convertMathNodes(Array.from(node.childNodes)) + '</m:e></m:rad>';
+    }
+    case 'mroot': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      return '<m:rad><m:deg>' + convertMathNodes(Array.from(kids[1].childNodes)) + '</m:deg>' +
+        '<m:e>' + convertMathNodes(Array.from(kids[0].childNodes)) + '</m:e></m:rad>';
+    }
+    case 'munder': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      const baseText = kids[0].textContent;
+      const underContent = convertMathNodes(Array.from(kids[1].childNodes));
+      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
+      if (['∑','∏','∫','⋃','⋂','⊕','⊗','∮','⨁','⨂'].includes(baseText)) {
+        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/>' +
+          '<m:subHide m:val="0"/><m:supHide m:val="1"/></m:naryPr>' +
+          '<m:sub>' + underContent + '</m:sub><m:sup/><m:e/></m:nary>';
+      }
+      return '<m:limLow><m:e>' + baseContent + '</m:e><m:lim>' + underContent + '</m:lim></m:limLow>';
+    }
+    case 'mover': {
+      if (kids.length < 2) return convertMathNodes(kids);
+      const baseText = kids[0].textContent;
+      const overText = kids[1].textContent;
+      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
+      const overContent = convertMathNodes(Array.from(kids[1].childNodes));
+      if (['∑','∏','∫','⋃','⋂','∮'].includes(baseText)) {
+        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/>' +
+          '<m:subHide m:val="1"/><m:supHide m:val="0"/></m:naryPr>' +
+          '<m:sub/><m:sup>' + overContent + '</m:sup><m:e/></m:nary>';
+      }
+      // 重音符號
+      if (['^','̂','ˆ'].includes(overText)) {
+        return '<m:acc><m:accPr><m:chr m:val="^"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
+      }
+      if (['¯','ˉ','‾','→','⃗','⇀'].includes(overText)) {
+        return '<m:acc><m:accPr><m:chr m:val="' + escapeXml(overText) + '"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
+      }
+      if (overText === '.' || overText === '˙') {
+        return '<m:acc><m:accPr><m:chr m:val="."/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
+      }
+      if (overText === '¨') {
+        return '<m:acc><m:accPr><m:chr m:val="¨"/></m:accPr><m:e>' + baseContent + '</m:e></m:acc>';
+      }
+      return '<m:limUpp><m:e>' + baseContent + '</m:e><m:lim>' + overContent + '</m:lim></m:limUpp>';
+    }
+    case 'munderover': {
+      if (kids.length < 3) return convertMathNodes(kids);
+      const baseText = kids[0].textContent;
+      const baseContent = convertMathNodes(Array.from(kids[0].childNodes));
+      const underContent = convertMathNodes(Array.from(kids[1].childNodes));
+      const overContent = convertMathNodes(Array.from(kids[2].childNodes));
+      if (['∑','∏','∫','⋃','⋂','∮','⨁','⨂'].includes(baseText)) {
+        return '<m:nary><m:naryPr><m:chr m:val="' + escapeXml(baseText) + '"/><m:limLoc m:val="undOvr"/></m:naryPr>' +
+          '<m:sub>' + underContent + '</m:sub><m:sup>' + overContent + '</m:sup><m:e/></m:nary>';
+      }
+      return '<m:limLow><m:e>' + baseContent + '</m:e><m:lim>' + underContent + '</m:lim></m:limLow>' +
+        '<m:limUpp><m:e/><m:lim>' + overContent + '</m:lim></m:limUpp>';
+    }
+    case 'mtable': {
+      const rows = elementChildren(node).filter(n => getLocalTag(n) === 'mtr');
+      let mRows = '';
+      let colCount = 1;
+      for (const row of rows) {
+        const cells = elementChildren(row).filter(n => getLocalTag(n) === 'mtd');
+        if (cells.length > colCount) colCount = cells.length;
+        let mCells = '';
+        for (const cell of cells) {
+          mCells += '<m:e>' + convertMathNodes(Array.from(cell.childNodes)) + '</m:e>';
+        }
+        mRows += '<m:mr>' + mCells + '</m:mr>';
+      }
+      const mcPr = '<m:mc><m:mcPr><m:count m:val="' + colCount + '"/><m:mcJc m:val="center"/></m:mcPr></m:mc>';
+      return '<m:m><m:mPr>' + mcPr + '</m:mPr>' + mRows + '</m:m>';
+    }
+    case 'mfenced': {
+      const open = node.getAttribute('open') || '(';
+      const close = node.getAttribute('close') || ')';
+      const inner = convertMathNodes(kids);
+      return '<m:d><m:dPr><m:begChr m:val="' + escapeXml(open) + '"/><m:endChr m:val="' + escapeXml(close) + '"/></m:dPr>' +
+        '<m:e>' + inner + '</m:e></m:d>';
+    }
+    case 'merror':
+      return mRun(node.textContent, 'p');
+    case 'mglyph':
+      return '';
+    default:
+      return convertMathNodes(Array.from(node.childNodes));
+  }
+}
+
+function mRun(text, style) {
+  if (!text) return '';
+  let rPr = '';
+  if (style === 'i') rPr = '<m:rPr><m:sty m:val="i"/></m:rPr>';
+  else if (style === 'b') rPr = '<m:rPr><m:sty m:val="b"/></m:rPr>';
+  else if (style === 'bi') rPr = '<m:rPr><m:sty m:val="bi"/></m:rPr>';
+  return '<m:r>' + rPr + '<m:t xml:space="preserve">' + escapeXml(text) + '</m:t></m:r>';
+}
+
+function copyOutput() {
+  navigator.clipboard.writeText(generatedContent).then(() => {
+    log('📋 已複製到剪貼簿', 'success');
   });
 }
-
-function strengthenWordPrintableElements(doc) {
-  doc.querySelectorAll('.page-break').forEach(el => {
-    el.style.pageBreakBefore = 'always';
-    el.style.setProperty('mso-page-break-before', 'always');
-    if (!el.textContent.trim()) el.innerHTML = '&nbsp;';
-  });
-
-  doc.querySelectorAll('.write-line').forEach(el => {
-    el.style.borderBottom = el.style.borderBottom || '1px dashed #000';
-    el.style.display = el.style.display || 'inline-block';
-    el.style.minWidth = el.style.minWidth || el.style.width || '90pt';
-    if (!el.textContent.trim()) el.innerHTML = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
-  });
-
-  doc.querySelectorAll('.answer-space').forEach(el => {
-    el.style.minHeight = el.style.minHeight || el.style.height || '22pt';
-    el.style.borderBottom = el.style.borderBottom || '1px solid #ccc';
-  });
-}
-
-function getDocxContentTypesXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Default Extension="html" ContentType="text/html"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>`;
-}
-
-function getDocxRootRelsXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`;
-}
-
-function getDocxDocumentXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <w:body>
-    <w:altChunk r:id="htmlChunk"/>
-    <w:sectPr>
-      <w:pgSz w:w="11906" w:h="16838"/>
-      <w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>
-    </w:sectPr>
-  </w:body>
-</w:document>`;
-}
-
-function getDocxDocumentRelsXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="htmlChunk" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="afchunk.html"/>
-</Relationships>`;
-}
-
-// 初始化 STT UI
-updateSttUI();
-updateModelHint();
 </script>
 
 </body>
