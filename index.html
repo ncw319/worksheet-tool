@@ -1153,6 +1153,18 @@ async function buildDocxBlob(html) {
   const children = htmlToDocxChildren(html);
   log('🔢 轉換 LaTeX 公式為 Word 原生方程式 (OMML)...', 'info');
 
+  // 從 HTML 中的 .page padding 提取頁邊距（預設 18mm/20mm）
+  let pageMargins = { top: 1021, right: 1134, bottom: 1134, left: 1134 };
+  const pageMatch = String(html).match(/\.page\s*\{[^}]*padding\s*:\s*([^;}]+)/i);
+  if (pageMatch) {
+    const padding = pageMatch[1].trim().split(/\s+/);
+    const pads = padding.map(v => cssLenToTwip(v)).filter(v => v !== null);
+    if (pads.length >= 1) pageMargins.top = pads[0];
+    if (pads.length >= 2) { pageMargins.right = pads[1]; pageMargins.left = pads[1]; }
+    if (pads.length >= 3) pageMargins.bottom = pads[2];
+    if (pads.length >= 4) pageMargins.left = pads[3];
+  }
+
   const { Document, Packer } = lib;
   const doc = new Document({
     creator: '黃楚標中學 AI 工作紙生成工具',
@@ -1160,7 +1172,7 @@ async function buildDocxBlob(html) {
     styles: {
       default: {
         document: {
-          run: { font: 'Microsoft JhengHei', size: 21 },
+          run: { font: 'Times New Roman', size: 24 },
         },
       },
     },
@@ -1168,7 +1180,7 @@ async function buildDocxBlob(html) {
       properties: {
         page: {
           size: { width: 11906, height: 16838 }, // A4
-          margin: { top: 1134, right: 1134, bottom: 1134, left: 1134 },
+          margin: pageMargins,
         },
       },
       children: children,
@@ -1262,7 +1274,8 @@ function nodeToDocx(node, ctx) {
     return codeBlockToDocx(node, ctx);
   }
   if (tag === 'br') {
-    return null;
+    const lib = D();
+    return new lib.TextRun({ text: '', break: 1 });
   }
   if (tag === 'hr') {
     return new lib.Paragraph({
@@ -1272,6 +1285,10 @@ function nodeToDocx(node, ctx) {
   }
   if (tag === 'table') {
     return tableToDocx(node, ctx);
+  }
+  const nodeCls = (node.getAttribute('class') || '').toLowerCase();
+  if (tag === 'div' && (/\binfo-row\b/.test(nodeCls) || /\binfo\b.*\brow\b/.test(nodeCls))) {
+    return infoRowToDocx(node, ctx);
   }
   if (tag === 'ul' || tag === 'ol') {
     return listToDocx(node, ctx, tag);
@@ -1325,7 +1342,7 @@ function blockToDocxParagraph(node, ctx, tag) {
   }
   if (Object.keys(indent).length) paraOpts.indent = indent;
 
-  let spacing = { after: 120, line: 320, lineRule: 'auto' };
+  let spacing = { after: 120, line: 432, lineRule: 'auto' };
   if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
     spacing = { before: 160, after: 80 };
   }
@@ -1352,16 +1369,17 @@ function blockToDocxParagraph(node, ctx, tag) {
       paraOpts.border = { left: { style: BorderStyle.SINGLE, size: sz, color: col, space: 4 } };
     }
   }
-  if (cssProps['border'] && /solid/i.test(cssProps['border'])) {
-    const m = cssProps['border'].match(/(\d+)\s*px\s*solid\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
+  if (cssProps['border'] && /solid|dashed/i.test(cssProps['border'])) {
+    const m = cssProps['border'].match(/(\d+)\s*px\s*(solid|dashed)\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
     if (m) {
+      const styleName = m[2].toLowerCase() === 'dashed' ? BorderStyle.DASHED : BorderStyle.SINGLE;
       const sz = Math.max(4, Math.round(parseInt(m[1], 10) * 8));
-      const col = cssColorToHex(m[2]) || '000000';
+      const col = cssColorToHex(m[3]) || '000000';
       paraOpts.border = {
-        top: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
-        left: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
-        bottom: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
-        right: { style: BorderStyle.SINGLE, size: sz, color: col, space: 1 },
+        top: { style: styleName, size: sz, color: col, space: 1 },
+        left: { style: styleName, size: sz, color: col, space: 1 },
+        bottom: { style: styleName, size: sz, color: col, space: 1 },
+        right: { style: styleName, size: sz, color: col, space: 1 },
       };
     }
   }
@@ -1369,6 +1387,13 @@ function blockToDocxParagraph(node, ctx, tag) {
   const cls = (node.getAttribute('class') || '').toLowerCase();
   if (/page-break|pagebreak/.test(cls) || /page-break-before:\s*always/i.test(node.getAttribute('style') || '')) {
     paraOpts.pageBreakBefore = true;
+  }
+  // answer-space 等特殊 class：用 min-height 模擬空白區域
+  if (cssProps['min-height']) {
+    const tw = cssLenToTwip(cssProps['min-height']);
+    if (tw) {
+      paraOpts.spacing = Object.assign({}, paraOpts.spacing, { after: Math.max(paraOpts.spacing.after || 0, tw) });
+    }
   }
 
   let childCtx = Object.assign({}, ctx);
@@ -1392,11 +1417,55 @@ function blockToDocxParagraph(node, ctx, tag) {
   if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) {
     childCtx.italic = true;
   }
+  if (cssProps['font-family']) {
+    const fnt = cssFontToDocx(cssProps['font-family']);
+    if (fnt) childCtx.font = fnt;
+  }
+  if ((cssProps['text-decoration'] && /underline/i.test(cssProps['text-decoration'])) ||
+      (cssProps['border-bottom'] && /solid/i.test(cssProps['border-bottom']))) {
+    childCtx.underline = true;
+  }
+  if (cssProps['line-height']) {
+    const lh = cssProps['line-height'].trim();
+    let lineVal = null;
+    if (lh === 'normal') {
+      lineVal = 240;
+    } else {
+      const nm = lh.match(/^(\d+(?:\.\d+)?)$/);
+      if (nm) {
+        lineVal = Math.round(parseFloat(nm[1]) * 240);
+      } else {
+        const emm = lh.match(/^(\d+(?:\.\d+)?)\s*(em|rem|pt|px)?$/i);
+        if (emm) {
+          const u = (emm[2] || '').toLowerCase();
+          const n = parseFloat(emm[1]);
+          if (u === 'px') lineVal = Math.round(n * 1.5);
+          else lineVal = Math.round(n * 240);
+        }
+      }
+    }
+    if (lineVal) {
+      spacing.line = lineVal;
+      spacing.lineRule = 'auto';
+    }
+  }
+  if (cssProps['padding-top']) {
+    const tw = cssLenToTwip(cssProps['padding-top']);
+    if (tw) spacing.before = tw;
+  }
+  if (cssProps['padding-bottom']) {
+    const tw = cssLenToTwip(cssProps['padding-bottom']);
+    if (tw) spacing.after = tw;
+  }
 
   const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
   const inlineRuns = [];
   const subBlocks = [];
   for (const child of Array.from(node.childNodes)) {
+    // 跳過塊級元素之間的純格式化空白文字節點
+    if (child.nodeType === Node.TEXT_NODE && (!child.textContent || /^\s*$/.test(child.textContent))) {
+      continue;
+    }
     const isBlockChild = child.nodeType === Node.ELEMENT_NODE && BLOCK_CHILDREN.includes(child.tagName.toLowerCase());
     if (isBlockChild) {
       subBlocks.push(child);
@@ -1500,6 +1569,18 @@ function inlineElementToDocxRuns(node, ctx) {
   }
   if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) elCtx.bold = true;
   if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) elCtx.italic = true;
+  if (cssProps['font-family']) {
+    const fnt = cssFontToDocx(cssProps['font-family']);
+    if (fnt) elCtx.font = fnt;
+  }
+  if ((cssProps['text-decoration'] && /underline/i.test(cssProps['text-decoration'])) ||
+      (cssProps['border-bottom'] && /solid|dashed/i.test(cssProps['border-bottom']))) {
+    elCtx.underline = true;
+  }
+  if (cssProps['background-color']) {
+    const hex = cssColorToHex(cssProps['background-color']);
+    if (hex) elCtx.shadingFill = hex;
+  }
 
   const runs = [];
   for (const child of Array.from(node.childNodes)) {
@@ -1579,8 +1660,17 @@ function textToDocxPlainRuns(text, ctx) {
   if (ctx.fontSize) opts.size = ctx.fontSize;
   if (ctx.subscript) opts.subscript = true;
   if (ctx.superscript) opts.superscript = true;
-  if (text.indexOf('\n') >= 0) {
-    const segs = text.split('\n');
+  if (ctx.font) opts.font = ctx.font;
+  if (ctx.shadingFill) {
+    opts.shading = { type: 'clear', fill: ctx.shadingFill };
+  }
+  // 若 underline + 純空白（含 &nbsp;），替換為下劃線字元以確保 Word 可見
+  let displayText = text;
+  if (ctx.underline && /^[\s\u00A0]*$/.test(text)) {
+    displayText = '__________';
+  }
+  if (displayText.indexOf('\n') >= 0) {
+    const segs = displayText.split('\n');
     const runs = [];
     for (let i = 0; i < segs.length; i++) {
       if (i > 0) runs.push(new TextRun(Object.assign({ text: '' }, opts, { break: 1 })));
@@ -1588,7 +1678,7 @@ function textToDocxPlainRuns(text, ctx) {
     }
     return runs;
   }
-  return [new TextRun(Object.assign({ text }, opts))];
+  return [new TextRun(Object.assign({ text: displayText }, opts))];
 }
 
 // LaTeX → docx.js Math 物件
@@ -1784,6 +1874,44 @@ function tableToDocx(node, ctx) {
   });
 }
 
+// info-row（flex 橫排）→ docx.js Table（單列多格）
+function infoRowToDocx(node, ctx) {
+  const lib = D();
+  const { Table, TableRow, TableCell, Paragraph, TextRun, WidthType } = lib;
+  const items = Array.from(node.querySelectorAll(':scope > div'));
+  if (!items.length) return null;
+
+  const cells = [];
+  for (const item of items) {
+    const cellParagraphs = [];
+    for (const child of Array.from(item.childNodes)) {
+      const childItems = nodeToDocx(child, ctx);
+      if (Array.isArray(childItems)) {
+        for (const it of childItems) {
+          if (it) {
+            if (it instanceof Paragraph) cellParagraphs.push(it);
+            else if (it instanceof Table) cellParagraphs.push(it);
+            else cellParagraphs.push(new Paragraph({ children: [it] }));
+          }
+        }
+      } else if (childItems) {
+        if (childItems instanceof Paragraph) cellParagraphs.push(childItems);
+        else if (childItems instanceof Table) cellParagraphs.push(childItems);
+        else cellParagraphs.push(new Paragraph({ children: [childItems] }));
+      }
+    }
+    if (cellParagraphs.length === 0) {
+      cellParagraphs.push(new Paragraph({}));
+    }
+    cells.push(new TableCell({ children: cellParagraphs }));
+  }
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [new TableRow({ children: cells })],
+  });
+}
+
 // 列表 → Paragraph 陣列
 function listToDocx(node, ctx, tag) {
   const lib = D();
@@ -1892,6 +2020,26 @@ function cssColorToHex(c) {
     return [parseInt(rgb[1]),parseInt(rgb[2]),parseInt(rgb[3])].map(n => n.toString(16).padStart(2,'0')).join('').toUpperCase();
   }
   return null;
+}
+
+// CSS font-family → docx font name
+function cssFontToDocx(fontFamily) {
+  if (!fontFamily) return null;
+  const m = String(fontFamily).match(/['"]?([^'",;]+)['"]?/);
+  if (!m) return null;
+  const name = m[1].trim();
+  const map = {
+    '新細明體': 'PMingLiU',
+    '細明體': 'MingLiU',
+    '微軟正黑體': 'Microsoft JhengHei',
+    '標楷體': 'DFKaiShu-B5-SB-E',
+    'times new roman': 'Times New Roman',
+    'arial': 'Arial',
+    'courier new': 'Courier New',
+    'consolas': 'Consolas',
+  };
+  const lower = name.toLowerCase();
+  return map[lower] || name;
 }
 
 // CSS font-size → half-pt
