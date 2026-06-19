@@ -952,7 +952,8 @@ async function generateWorksheet() {
 7. 使用適合列印的版面（A4，正體字）
 ${mathPromptBlock}
 11. 嚴禁在 HTML 中引用任何外部 JavaScript 函式庫或 CDN（包括但不限於 polyfill.io、cdn.jsdelivr.net、unpkg.com、cdnjs 等）；所有 <script> 標籤一律不要輸出，公式渲染由系統自動處理
-12. 嚴禁使用 <iframe>、<object>、<embed> 等嵌入標籤，嚴禁使用 on* 事件處理器（onclick、onload 等）`;
+12. 嚴禁使用 <iframe>、<object>、<embed> 等嵌入標籤，嚴禁使用 on* 事件處理器（onclick、onload 等）
+13. 輸出的 HTML 中絕對不要包含 <\/script> 字串，所有腳本標籤一律省略`;
 
     const userPrompt = `請為以下要求生成工作紙：
 
@@ -1699,7 +1700,7 @@ function sanitizeHtmlForPreview(html) {
   ];
   // 移除所有 <script src="..."> 外部引用（保留 MathJax 由我們自己注入）
   s = s.replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*["'][^>]*>\s*<\/script>/gi, '');
-  // 移除所有 <script>...</script> 內聯腳本
+  // 移除所有內聯 script 標籤（含標籤名以 < 開頭的成對標籤）
   s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
   // 移除 <iframe>、<object>、<embed>
   s = s.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
