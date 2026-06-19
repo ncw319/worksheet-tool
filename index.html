@@ -1494,11 +1494,13 @@ function blockToWml(node, ctx, tag) {
   }
 
   // run-level 屬性（sz、color）必須包在 <w:rPr> 內置於 <w:pPr>，否則 Word 拒絕開啟
+  // rPr 內順序：color 必須在 sz 之前（CT_RPr 順序）
   let pPrRpr = '';
   if (runSz || headingColor) {
-    pPrRpr = '<w:rPr>' + runSz + headingColor + '</w:rPr>';
+    pPrRpr = '<w:rPr>' + headingColor + runSz + '</w:rPr>';
   }
-  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + tabs + spacing + shd + pBdr + pPrRpr + '</w:pPr>';
+  // pPr 內元素順序（CT_PPrBase）：pageBreakBefore, pBdr, shd, tabs, spacing, ind, jc, rPr
+  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + pBdr + shd + tabs + spacing + ind + jc + pPrRpr + '</w:pPr>';
 
   // 分離 inline 與 block 子節點
   const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
@@ -1531,7 +1533,7 @@ function blockToWml(node, ctx, tag) {
           result += '<w:p>' + pPr + textRuns + '</w:p>';
         }
       } else {
-        result += '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120"/></w:pPr>' + parts[i] + '</w:p>';
+        result += '<w:p><w:pPr><w:spacing w:before="120" w:after="120"/><w:jc w:val="center"/></w:pPr>' + parts[i] + '</w:p>';
       }
     }
   }
@@ -1624,7 +1626,7 @@ function answerSpaceToWml(cssProps) {
   }
   let wml = '<w:p><w:pPr><w:spacing w:before="120" w:after="120"/></w:pPr></w:p>';
   for (let i = 0; i < lines; i++) {
-    wml += '<w:p><w:pPr><w:spacing w:after="0"/><w:pBdr><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="999999"/></w:pBdr></w:pPr></w:p>';
+    wml += '<w:p><w:pPr><w:pBdr><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="999999"/></w:pBdr><w:spacing w:after="0"/></w:pPr></w:p>';
   }
   return wml;
 }
@@ -1675,15 +1677,16 @@ function restoreDollar(s, placeholders) {
 function makeTextRun(text, ctx) {
   if (!text) return '';
   const escaped = escapeXml(text);
+  // CT_RPr 嚴格順序：b, i, strike, color, sz, szCs, u, vertAlign
   const props = [];
   if (ctx.bold) props.push('<w:b/>');
   if (ctx.italic) props.push('<w:i/>');
-  if (ctx.underline) props.push('<w:u w:val="single"/>');
   if (ctx.strike) props.push('<w:strike/>');
-  if (ctx.superscript) props.push('<w:vertAlign w:val="superscript"/>');
-  if (ctx.subscript) props.push('<w:vertAlign w:val="subscript"/>');
   if (ctx.color) props.push('<w:color w:val="' + ctx.color + '"/>');
   if (ctx.fontSize) props.push('<w:sz w:val="' + ctx.fontSize + '"/><w:szCs w:val="' + ctx.fontSize + '"/>');
+  if (ctx.underline) props.push('<w:u w:val="single"/>');
+  if (ctx.superscript) props.push('<w:vertAlign w:val="superscript"/>');
+  if (ctx.subscript) props.push('<w:vertAlign w:val="subscript"/>');
   let rPr = props.length ? '<w:rPr>' + props.join('') + '</w:rPr>' : '';
   if (text.indexOf('\n') >= 0) {
     const segs = text.split('\n');
@@ -1791,7 +1794,7 @@ function listToWml(node, ctx, tag) {
     for (const child of Array.from(item.childNodes)) {
       content += nodeToWml(child, ctx);
     }
-    const pPr = '<w:pPr><w:ind w:left="480" w:hanging="360"/><w:spacing w:after="60"/></w:pPr>';
+    const pPr = '<w:pPr><w:spacing w:after="60"/><w:ind w:left="480" w:hanging="360"/></w:pPr>';
     wml += '<w:p>' + pPr + makeTextRun(prefix, ctx) + content + '</w:p>';
     idx++;
   }
@@ -2024,8 +2027,24 @@ function printOutput() {
     log('❌ 彈窗被瀏覽器封鎖，請允許彈窗後重試', 'error');
     return;
   }
+  // 數學類科目需注入 MathJax 才能渲染 LaTeX 公式
+  const subject = document.getElementById('subject').value;
+  const isMathSubjectNow = MATH_SUBJECTS.includes(subject);
+  let printHtml = generatedContent;
+  if (isMathSubjectNow) {
+    const mathjaxSnippet =
+      '<script>window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" }, startup: { typeset: true } };<\/script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"><\/script>';
+    if (/<\/head>/i.test(printHtml)) {
+      printHtml = printHtml.replace(/<\/head>/i, mathjaxSnippet + '</head>');
+    } else if (/<body[^>]*>/i.test(printHtml)) {
+      printHtml = printHtml.replace(/<body[^>]*>/i, m => m + mathjaxSnippet);
+    } else {
+      printHtml = mathjaxSnippet + printHtml;
+    }
+  }
   w.document.open();
-  w.document.write(generatedContent);
+  w.document.write(printHtml);
   w.document.close();
   // 等待內容（與 MathJax）載入完成後再啟動列印
   const triggerPrint = () => {
@@ -2037,8 +2056,16 @@ function printOutput() {
     }
   };
   // 若 MathJax 仍在載入，等它完成後再列印；否則直接列印
-  if (w.MathJax && w.MathJax.startup) {
-    w.MathJax.startup.promise.then(triggerPrint).catch(triggerPrint);
+  if (isMathSubjectNow) {
+    // 數學類科目：等 MathJax 排版完成後再列印
+    const waitMath = () => {
+      if (w.MathJax && w.MathJax.startup) {
+        w.MathJax.startup.promise.then(triggerPrint).catch(() => setTimeout(triggerPrint, 1500));
+      } else {
+        setTimeout(waitMath, 200);
+      }
+    };
+    setTimeout(waitMath, 300);
   } else {
     w.onload = triggerPrint;
   }
