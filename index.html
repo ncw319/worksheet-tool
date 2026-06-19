@@ -493,6 +493,7 @@
       <div class="download-buttons" id="downloadButtons" style="display:none;">
         <button onclick="downloadOutput()">💾 下載 DOCX (含原生方程式)</button>
         <button onclick="copyOutput()">📋 複製 HTML 原始碼</button>
+        <button onclick="printOutput()">🖨️ 列印 HTML</button>
       </div>
     </div>
   </div>
@@ -1311,6 +1312,10 @@ function nodeToWml(node, ctx) {
   if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'blockquote'].includes(tag)) {
     return blockToWml(node, ctx, tag);
   }
+  // 程式碼區塊：<pre> 或 class 含 code-block / code
+  if (tag === 'pre' || (tag === 'div' && /code-block|code\b/i.test(node.getAttribute('class') || ''))) {
+    return codeBlockToWml(node, ctx);
+  }
   if (tag === 'br') {
     return '<w:r><w:br/></w:r>';
   }
@@ -1372,6 +1377,11 @@ function blockToWml(node, ctx, tag) {
   const cls = (node.getAttribute('class') || '').toLowerCase();
   const cssProps = resolveStyle(node);
   let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(cssProps['page-break-before'] || '');
+
+  // 程式碼區塊：white-space: pre 或 class 含 code-block
+  if (/\bcode-block\b/.test(cls) || /\bpre\b/i.test(cssProps['white-space'] || '') || /monospace/i.test(cssProps['font-family'] || '')) {
+    return codeBlockToWml(node, ctx, cssProps);
+  }
 
   // 處理 display:flex / inline-flex → 表格並排
   if (/flex/i.test(cssProps['display'] || '')) {
@@ -1439,7 +1449,43 @@ function blockToWml(node, ctx, tag) {
     if (tw) spacing = '<w:spacing w:before="' + tw + '" w:after="120" w:line="320" w:lineRule="auto"/>';
   }
 
-  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + spacing + runSz + headingColor + '</w:pPr>';
+  // 段落背景色與邊框（section-title、answer-item 等）
+  let pBdr = '', shd = '';
+  if (cssProps['background-color']) {
+    const hex = cssColorToHex(cssProps['background-color']);
+    if (hex) shd = '<w:shd w:val="clear" w:color="auto" w:fill="' + hex + '"/>';
+  }
+  if (cssProps['border-left']) {
+    const m = cssProps['border-left'].match(/(\d+)\s*px\s*(?:solid|dashed|double)?\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
+    if (m) {
+      const sz = Math.max(4, Math.round(parseInt(m[1],10) * 8));
+      const col = cssColorToHex(m[2]) || '000000';
+      pBdr = '<w:pBdr><w:left w:val="single" w:sz="' + sz + '" w:space="4" w:color="' + col + '"/></w:pBdr>';
+    }
+  }
+  if (cssProps['border'] && /solid/i.test(cssProps['border'])) {
+    const m = cssProps['border'].match(/(\d+)\s*px\s*solid\s*(#[0-9a-f]{3,6}|[a-z]+)/i);
+    if (m) {
+      const sz = Math.max(4, Math.round(parseInt(m[1],10) * 8));
+      const col = cssColorToHex(m[2]) || '000000';
+      pBdr = '<w:pBdr><w:top w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
+        '<w:left w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
+        '<w:bottom w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/>' +
+        '<w:right w:val="single" w:sz="' + sz + '" w:space="1" w:color="' + col + '"/></w:pBdr>';
+    }
+  }
+  // float:right 的 span（如 marks 分數）在 nodeToWml 中會前綴 tab；
+  // 段落若含 float:right 子元素，加 right tab stop 讓分數推到右側
+  let tabs = '';
+  const hasFloatRight = Array.from(node.querySelectorAll('span, div')).some(el => {
+    const s = resolveStyle(el);
+    return /right/i.test(s['float'] || '');
+  });
+  if (hasFloatRight) {
+    tabs = '<w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs>';
+  }
+
+  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + tabs + spacing + shd + pBdr + runSz + headingColor + '</w:pPr>';
 
   // 分離 inline 與 block 子節點
   const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
@@ -1478,6 +1524,47 @@ function blockToWml(node, ctx, tag) {
   }
   if (!result) result = '<w:p>' + pPr + '</w:p>';
   return result;
+}
+
+// 程式碼區塊 → 帶背景色、邊框、等寬字體的單格表格（保留換行與縮排）
+function codeBlockToWml(node, ctx, cssProps) {
+  cssProps = cssProps || resolveStyle(node);
+  // 取得原始文字（保留換行與縮排）
+  const rawText = node.textContent;
+  if (!rawText) return '';
+  // 用單格表格模擬 code-block（背景色 + 邊框 + 內距）
+  const bgHex = cssColorToHex(cssProps['background-color'] || '#f5f5f5') || 'F5F5F5';
+  const borderHex = cssColorToHex((cssProps['border'] || '').match(/#[0-9a-f]{3,6}/i)?.[0] || '#dddddd') || 'DDDDDD';
+  // 等寬字體
+  const rFonts = '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Consolas" w:cs="Consolas"/>';
+
+  // 把文字按換行切分，每行一個段落（同一格內）
+  const lines = rawText.split('\n');
+  let cellParas = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const escaped = escapeXml(line);
+    // 保留行首空白（xml:space="preserve" 已處理）
+    const para = '<w:p><w:pPr><w:spacing w:after="0" w:line="280" w:lineRule="exact"/><w:ind w:left="0"/></w:pPr>' +
+      '<w:r><w:rPr>' + rFonts + '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>' +
+      '<w:t xml:space="preserve">' + escaped + '</w:t></w:r></w:p>';
+    cellParas += para;
+  }
+
+  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>' +
+    '<w:top w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
+    '<w:left w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
+    '<w:bottom w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
+    '<w:right w:val="single" w:sz="4" w:color="' + borderHex + '"/>' +
+    '<w:insideH w:val="none" w:sz="0"/>' +
+    '<w:insideV w:val="none" w:sz="0"/>' +
+    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
+  const tblGrid = '<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>';
+  const tcPr = '<w:tcPr><w:tcW w:w="9000" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="' + bgHex + '"/>' +
+    '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>' +
+    '<w:bottom w:w="120" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tcMar></w:tcPr>';
+  return '<w:tbl>' + tblPr + tblGrid + '<w:tr><w:tc>' + tcPr + cellParas + '</w:tc></w:tr></w:tbl>' +
+    '<w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>';
 }
 
 // flex 容器 → 表格（每個子元素一格）
@@ -1912,6 +1999,37 @@ function copyOutput() {
   navigator.clipboard.writeText(generatedContent).then(() => {
     log('📋 已複製到剪貼簿', 'success');
   });
+}
+
+function printOutput() {
+  if (!generatedContent) {
+    log('❌ 沒有可列印的內容', 'error');
+    return;
+  }
+  const w = window.open('', '_blank');
+  if (!w) {
+    log('❌ 彈窗被瀏覽器封鎖，請允許彈窗後重試', 'error');
+    return;
+  }
+  w.document.open();
+  w.document.write(generatedContent);
+  w.document.close();
+  // 等待內容（與 MathJax）載入完成後再啟動列印
+  const triggerPrint = () => {
+    try {
+      w.focus();
+      w.print();
+    } catch (e) {
+      log('⚠️ 列印啟動失敗：' + e.message, 'error');
+    }
+  };
+  // 若 MathJax 仍在載入，等它完成後再列印；否則直接列印
+  if (w.MathJax && w.MathJax.startup) {
+    w.MathJax.startup.promise.then(triggerPrint).catch(triggerPrint);
+  } else {
+    w.onload = triggerPrint;
+  }
+  log('🖨️ 已開啟列印視窗', 'success');
 }
 </script>
 
