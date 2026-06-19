@@ -938,7 +938,9 @@ async function generateWorksheet() {
    - 常見用法：上下標 $x^{n}$、$a_{i}$；分式 $\\frac{分子}{分母}$；根號 $\\sqrt[n]{x}$；希臘字母 $\\alpha \\beta \\gamma \\pi \\theta$；不等號 $\\leq \\geq \\neq$；求和 $\\sum_{i=1}^{n}$；極限 $\\lim_{x \\to 0}$；矩陣 $\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}$
    - 單位、變數、簡單符號也用 LaTeX：$\\text{m/s}$、$v = u + at$、$\\Delta E = mc^2$
 9. 不要用 Unicode 數學符號（如 ² ³ √ ∫ ∑）替代 LaTeX；不要用 OMML 或 MathML
-10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫`;
+10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫
+11. 嚴禁在 HTML 中引用任何外部 JavaScript 函式庫或 CDN（包括但不限於 polyfill.io、cdn.jsdelivr.net、unpkg.com、cdnjs 等）；所有 <script> 標籤一律不要輸出，公式渲染由系統自動處理
+12. 嚴禁使用 <iframe>、<object>、<embed> 等嵌入標籤，嚴禁使用 on* 事件處理器（onclick、onload 等）`;
 
     const userPrompt = `請為以下要求生成工作紙：
 
@@ -1034,10 +1036,12 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     if (!htmlContent.includes('<!DOCTYPE') && !htmlContent.includes('<html')) {
       htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:"Microsoft JhengHei";padding:30px;line-height:1.8;}</style></head><body>${htmlContent}</body></html>`;
     }
-    
+
+    // 安全清洗：移除所有外部 script 與已知惡意網域引用
+    htmlContent = sanitizeHtmlForPreview(htmlContent);
     generatedContent = htmlContent;
 
-    // 預覽
+    // 預覽（已清洗外部 script，僅保留 MathJax 注入）
     const preview = document.getElementById('previewArea');
     const iframe = document.createElement('iframe');
     iframe.style.cssText = 'width:100%;height:480px;border:none;';
@@ -1135,20 +1139,121 @@ async function buildDocxBlob(html) {
   });
 }
 
-// ============ HTML → WordprocessingML 轉換 ============
+// ============ HTML → WordprocessingML 轉換（含 CSS 樣式解析）============
+// 全域 CSS 樣式表（從 <style> 解析）
+let GLOBAL_CSS_MAP = {};
+
+function parseStylesheet(html) {
+  const map = {};
+  const styleMatches = html.match(/<style[^>]*>([\s\S]*?)<\/style>/gi) || [];
+  let css = '';
+  for (const s of styleMatches) css += s.replace(/<\/?style[^>]*>/gi, '');
+  // 移除註解
+  css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  // 移除 @media 等 at-rules（簡化：只取規則塊）
+  // 解析 .class { props } 規則
+  const ruleRegex = /([.#]?[\w-]+(?:\s*,\s*[.#]?[\w-]+)*)\s*\{([^}]*)\}/g;
+  let m;
+  while ((m = ruleRegex.exec(css)) !== null) {
+    const selectors = m[1].split(',').map(s => s.trim());
+    const props = parseCssDecls(m[2]);
+    for (const sel of selectors) {
+      if (sel.startsWith('.')) {
+        const cls = sel.slice(1);
+        map[cls] = Object.assign(map[cls] || {}, props);
+      }
+    }
+  }
+  return map;
+}
+
+function parseCssDecls(text) {
+  const props = {};
+  const decls = text.split(';');
+  for (const d of decls) {
+    const idx = d.indexOf(':');
+    if (idx < 0) continue;
+    const key = d.slice(0, idx).trim().toLowerCase();
+    const val = d.slice(idx + 1).trim();
+    if (key && val) props[key] = val;
+  }
+  return props;
+}
+
+// 合併 class 樣式 + inline style
+function resolveStyle(node) {
+  const cls = (node.getAttribute('class') || '').trim().split(/\s+/);
+  let props = {};
+  for (const c of cls) {
+    if (GLOBAL_CSS_MAP[c]) props = Object.assign(props, GLOBAL_CSS_MAP[c]);
+  }
+  const inline = node.getAttribute('style') || '';
+  if (inline) props = Object.assign(props, parseCssDecls(inline));
+  return props;
+}
+
+// CSS 顏色 → 6 位 hex（無 #）
+function cssColorToHex(c) {
+  if (!c) return null;
+  c = c.trim();
+  const named = {red:'FF0000',blue:'0000FF',green:'008000',black:'000000',white:'FFFFFF',navy:'000080',maroon:'800000',purple:'800080',gray:'808080',grey:'808080',orange:'FFA500',yellow:'FFFF00',teal:'008080',aqua:'00FFFF',lime:'00FF00',silver:'C0C0C0',olive:'808000',fuchsia:'FF00FF'};
+  if (named[c.toLowerCase()]) return named[c.toLowerCase()];
+  const hex = c.match(/#([0-9a-f]{3}|[0-9a-f]{6})/i);
+  if (hex) {
+    let h = hex[1];
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    return h.toUpperCase();
+  }
+  const rgb = c.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgb) {
+    return [parseInt(rgb[1]),parseInt(rgb[2]),parseInt(rgb[3])].map(n => n.toString(16).padStart(2,'0')).join('').toUpperCase();
+  }
+  return null;
+}
+
+// CSS font-size → half-pt
+function cssSizeToHalfPt(v) {
+  if (!v) return null;
+  const m = v.match(/(\d+(?:\.\d+)?)\s*(pt|px|em|rem)?/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  const unit = (m[2] || 'pt').toLowerCase();
+  if (unit === 'pt') return Math.round(n * 2);
+  if (unit === 'px') return Math.round(n * 1.5);
+  if (unit === 'em' || unit === 'rem') return Math.round(n * 24);
+  return Math.round(n * 2);
+}
+
+// CSS margin/padding 數字 → twip (1pt = 20 twip)
+function cssLenToTwip(v) {
+  if (!v) return null;
+  const m = v.match(/(\d+(?:\.\d+)?)\s*(pt|px|em|rem|cm|mm)?/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  const unit = (m[2] || 'pt').toLowerCase();
+  if (unit === 'pt') return Math.round(n * 20);
+  if (unit === 'px') return Math.round(n * 15);
+  if (unit === 'cm') return Math.round(n * 567);
+  if (unit === 'mm') return Math.round(n * 56.7);
+  if (unit === 'em' || unit === 'rem') return Math.round(n * 240);
+  return Math.round(n * 20);
+}
+
 function htmlToWml(html) {
-  const cleaned = String(html || '')
+  const raw = String(html || '')
     .replace(/```html\s*/gi, '')
     .replace(/```/g, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '');
+    .replace(/<script[\s\S]*?<\/script>/gi, '');
+  // 先解析樣式表
+  GLOBAL_CSS_MAP = parseStylesheet(raw);
+  // 移除 <style> 後解析 DOM
+  const cleaned = raw.replace(/<style[\s\S]*?<\/style>/gi, '');
   const doc = new DOMParser().parseFromString(cleaned, 'text/html');
-  // body 直接子層：累積 inline 內容，遇到 block 就先輸出累積的 inline 為段落
   const BLOCK_TAGS = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
   let wml = '';
   let inlineBuffer = '';
   const flushInline = () => {
-    if (inlineBuffer && inlineBuffer.trim()) {
+    if (inlineBuffer && inlineBuffer.replace(/<[^>]+>/g,'').trim()) {
       wml += '<w:p><w:pPr><w:spacing w:after="120" w:line="320" w:lineRule="auto"/></w:pPr>' + inlineBuffer + '</w:p>';
     }
     inlineBuffer = '';
@@ -1191,31 +1296,41 @@ function nodeToWml(node, ctx) {
     return listToWml(node, ctx, tag);
   }
   if (tag === 'li') {
-    // li 直接被 ul/ol 處理；若單獨出現，當作段落
     return blockToWml(node, ctx, 'p');
   }
   if (tag === 'img') {
     return '<w:p><w:r><w:t xml:space="preserve">[圖片]</w:t></w:r></w:p>';
   }
 
-  // 行內元素
+  // 行內元素：合併 class CSS + inline style + HTML 語意標籤
   const newCtx = Object.assign({}, ctx);
+  const cssProps = (tag === 'span' || tag === 'font' || tag === 'a' || tag === 'b' || tag === 'i' || tag === 'em' || tag === 'strong' || tag === 'u' || tag === 's') ? resolveStyle(node) : {};
+
   if (tag === 'b' || tag === 'strong') newCtx.bold = true;
   if (tag === 'i' || tag === 'em') newCtx.italic = true;
   if (tag === 'u') newCtx.underline = true;
   if (tag === 'sub') newCtx.subscript = true;
   if (tag === 'sup') newCtx.superscript = true;
   if (tag === 's' || tag === 'del' || tag === 'strike') newCtx.strike = true;
-  if (tag === 'span' || tag === 'font') {
-    const style = node.getAttribute('style') || '';
-    if (/font-weight\s*:\s*(bold|[6-9]00)/i.test(style)) newCtx.bold = true;
-    if (/font-style\s*:\s*italic/i.test(style)) newCtx.italic = true;
-    if (/text-decoration[^;]*underline/i.test(style)) newCtx.underline = true;
-    if (/text-decoration[^;]*line-through/i.test(style)) newCtx.strike = true;
-    const color = (style.match(/color\s*:\s*(#[0-9a-f]{3,6}|[a-z]+)/i) || [])[1];
-    if (color) newCtx.color = color;
-    const fs = (style.match(/font-size\s*:\s*(\d+)\s*(pt|px)/i) || []);
-    if (fs[1]) newCtx.fontSize = fs[2] === 'pt' ? parseInt(fs[1],10)*2 : Math.round(parseInt(fs[1],10)*1.5);
+
+  // 從 CSS 屬性更新樣式
+  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) newCtx.bold = true;
+  if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) newCtx.italic = true;
+  if (cssProps['text-decoration']) {
+    if (/underline/i.test(cssProps['text-decoration'])) newCtx.underline = true;
+    if (/line-through/i.test(cssProps['text-decoration'])) newCtx.strike = true;
+  }
+  if (cssProps['color']) {
+    const hex = cssColorToHex(cssProps['color']);
+    if (hex) newCtx.color = hex;
+  }
+  if (cssProps['font-size']) {
+    const hp = cssSizeToHalfPt(cssProps['font-size']);
+    if (hp) newCtx.fontSize = hp;
+  }
+  // border-bottom → 底線（填空線）
+  if (cssProps['border-bottom'] && !/none/i.test(cssProps['border-bottom'])) {
+    newCtx.underline = true;
   }
 
   let result = '';
@@ -1227,36 +1342,80 @@ function nodeToWml(node, ctx) {
 
 function blockToWml(node, ctx, tag) {
   const cls = (node.getAttribute('class') || '').toLowerCase();
-  const style = node.getAttribute('style') || '';
-  let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(style);
+  const cssProps = resolveStyle(node);
+  let pageBreak = /page-break/.test(cls) || /page-break-before\s*:\s*always/i.test(cssProps['page-break-before'] || '');
+
+  // 處理 display:flex / inline-flex → 表格並排
+  if (/flex/i.test(cssProps['display'] || '')) {
+    return flexToTable(node, ctx, cssProps);
+  }
+
+  // 處理 answer-space / answer-space-like 空白答題區
+  const minHeight = cssProps['min-height'] || '';
+  const isEmptyBlock = !node.textContent.trim() && !node.querySelector('img,table,ul,ol');
+  if (isEmptyBlock && (cls.includes('answer-space') || (minHeight && /px|pt/i.test(minHeight)))) {
+    return answerSpaceToWml(cssProps);
+  }
 
   // 對齊
-  const align = (style.match(/text-align\s*:\s*(left|center|right|justify)/i) || [])[1];
   let jc = '';
-  if (align) jc = '<w:jc w:val="' + align + '"/>';
-  if (/text-align\s*:\s*center/i.test(style) || /center/.test(cls)) jc = '<w:jc w:val="center"/>';
+  const align = cssProps['text-align'];
+  if (align && ['left','center','right','justify'].includes(align)) jc = '<w:jc w:val="' + align + '"/>';
 
   // 標題字級與粗體
-  let sz = '', heading = false;
+  let sz = '', heading = false, headingColor = '';
   if (tag === 'h1') { sz = '<w:sz w:val="36"/><w:szCs w:val="36"/>'; heading = true; }
   else if (tag === 'h2') { sz = '<w:sz w:val="30"/><w:szCs w:val="30"/>'; heading = true; }
   else if (tag === 'h3') { sz = '<w:sz w:val="26"/><w:szCs w:val="26"/>'; heading = true; }
   else if (tag === 'h4') { sz = '<w:sz w:val="24"/><w:szCs w:val="24"/>'; heading = true; }
   else if (tag === 'h5' || tag === 'h6') { sz = '<w:sz w:val="22"/><w:szCs w:val="22"/>'; heading = true; }
 
-  let spacing = '';
-  if (heading) {
-    spacing = '<w:spacing w:before="160" w:after="80"/>';
-  } else {
-    spacing = '<w:spacing w:after="120" w:line="320" w:lineRule="auto"/>';
+  // 從 CSS 取字級、粗體、顏色
+  const childCtx = Object.assign({}, ctx);
+  let runSz = '';
+  if (cssProps['font-size']) {
+    const hp = cssSizeToHalfPt(cssProps['font-size']);
+    if (hp) { runSz = '<w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/>'; childCtx.fontSize = hp; }
+  } else if (sz) {
+    runSz = sz;
+  }
+  if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) {
+    childCtx.bold = true;
+  }
+  if (heading) childCtx.bold = true;
+  if (cssProps['color']) {
+    const hex = cssColorToHex(cssProps['color']);
+    if (hex) { childCtx.color = hex; headingColor = '<w:color w:val="' + hex + '"/>'; }
   }
 
-  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + spacing + sz + '</w:pPr>';
-  const childCtx = heading ? Object.assign({}, ctx, { bold: true }) : ctx;
+  // 縮排
+  let ind = '';
+  if (cssProps['margin-left']) {
+    const tw = cssLenToTwip(cssProps['margin-left']);
+    if (tw) ind = '<w:ind w:left="' + tw + '"/>';
+  }
+  if (cssProps['padding-left'] && !ind) {
+    const tw = cssLenToTwip(cssProps['padding-left']);
+    if (tw) ind = '<w:ind w:left="' + tw + '"/>';
+  }
 
-  // 分離 inline 與 block 子節點，避免 <w:p> 嵌套
+  // 間距
+  let spacing = '<w:spacing w:after="120" w:line="320" w:lineRule="auto"/>';
+  if (heading) spacing = '<w:spacing w:before="160" w:after="80"/>';
+  if (cssProps['margin-bottom']) {
+    const tw = cssLenToTwip(cssProps['margin-bottom']);
+    if (tw) spacing = '<w:spacing w:after="' + tw + '" w:line="320" w:lineRule="auto"/>';
+  }
+  if (cssProps['margin-top']) {
+    const tw = cssLenToTwip(cssProps['margin-top']);
+    if (tw) spacing = '<w:spacing w:before="' + tw + '" w:after="120" w:line="320" w:lineRule="auto"/>';
+  }
+
+  const pPr = '<w:pPr>' + (pageBreak ? '<w:pageBreakBefore/>' : '') + jc + ind + spacing + runSz + headingColor + '</w:pPr>';
+
+  // 分離 inline 與 block 子節點
   const BLOCK_CHILDREN = ['p','div','h1','h2','h3','h4','h5','h6','section','article','header','footer','blockquote','table','ul','ol','hr','figure','pre'];
-  const segments = []; // {type:'inline'|'block', content}
+  const segments = [];
   let curInline = '';
   for (const child of Array.from(node.childNodes)) {
     const isBlockChild = child.nodeType === Node.ELEMENT_NODE && BLOCK_CHILDREN.includes(child.tagName.toLowerCase());
@@ -1280,13 +1439,11 @@ function blockToWml(node, ctx, tag) {
     for (let i = 0; i < parts.length; i++) {
       if (i % 2 === 0) {
         const textRuns = parts[i];
-        // 只含 XML 標籤與空白時視為空
         const textOnly = textRuns.replace(/<[^>]+>/g, '').trim();
         if (textOnly) {
           result += '<w:p>' + pPr + textRuns + '</w:p>';
         }
       } else {
-        // display math - 獨立置中段落
         result += '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120"/></w:pPr>' + parts[i] + '</w:p>';
       }
     }
@@ -1295,34 +1452,93 @@ function blockToWml(node, ctx, tag) {
   return result;
 }
 
+// flex 容器 → 表格（每個子元素一格）
+function flexToTable(node, ctx, cssProps) {
+  const items = Array.from(node.children);
+  if (!items.length) return '';
+  const n = items.length;
+  const colW = Math.floor(9000 / n);
+  const tblPr = '<w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>' +
+    '<w:top w:val="none" w:sz="0"/><w:left w:val="none" w:sz="0"/>' +
+    '<w:bottom w:val="none" w:sz="0"/><w:right w:val="none" w:sz="0"/>' +
+    '<w:insideH w:val="none" w:sz="0"/><w:insideV w:val="none" w:sz="0"/>' +
+    '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>';
+  const tblGrid = '<w:tblGrid>' + Array(n).fill('<w:gridCol w:w="' + colW + '"/>').join('') + '</w:tblGrid>';
+  let tcWml = '';
+  for (const item of items) {
+    let cellContent = '';
+    // 處理 info-field：label + 底線 span
+    const itemCtx = Object.assign({}, ctx);
+    const itemCss = resolveStyle(item);
+    if (itemCss['font-weight'] && /bold|[6-9]00/i.test(itemCss['font-weight'])) itemCtx.bold = true;
+    for (const child of Array.from(item.childNodes)) {
+      cellContent += nodeToWml(child, itemCtx);
+    }
+    // 把所有內容包成單一段落（flex 子項通常是單行）
+    if (!cellContent.includes('<w:p>')) {
+      cellContent = '<w:p><w:pPr><w:spacing w:after="40"/></w:pPr>' + cellContent + '</w:p>';
+    }
+    // 處理底線填空 span（info-line）
+    const tcPr = '<w:tcPr><w:tcW w:w="' + colW + '" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr>';
+    tcWml += '<w:tc>' + tcPr + cellContent + '</w:tc>';
+  }
+  return '<w:tbl>' + tblPr + tblGrid + '<w:tr>' + tcWml + '</w:tr></w:tbl>';
+}
+
+// 空白答題區 → 多行底線
+function answerSpaceToWml(cssProps) {
+  let lines = 3;
+  const mh = cssProps['min-height'] || '';
+  const m = mh.match(/(\d+)/);
+  if (m) {
+    const px = parseInt(m[1], 10);
+    lines = Math.max(1, Math.round(px / 25));
+  }
+  let wml = '<w:p><w:pPr><w:spacing w:before="120" w:after="120"/></w:pPr></w:p>';
+  for (let i = 0; i < lines; i++) {
+    wml += '<w:p><w:pPr><w:spacing w:after="0"/><w:pBdr><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="999999"/></w:pBdr></w:pPr></w:p>';
+  }
+  return wml;
+}
+
 function textToWmlRuns(text, ctx) {
   if (!text) return '';
   const runs = [];
-  // 匹配 $$...$$ 或 $...$（優先 $$）
+  // 匹配 $$...$$ 或 $...$，但跳過 \$ 跳脫
+  // 先把 \$ 暫存為佔位符，避免干擾配對
+  const placeholders = [];
+  let work = text.replace(/\\\$/g, () => {
+    placeholders.push('$');
+    return '\u0001DOLLAR\u0001';
+  });
   const regex = /(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g;
   let lastIndex = 0;
   let match;
-  while ((match = regex.exec(text)) !== null) {
+  while ((match = regex.exec(work)) !== null) {
     if (match.index > lastIndex) {
-      runs.push(makeTextRun(text.slice(lastIndex, match.index), ctx));
+      runs.push(makeTextRun(restoreDollar(work.slice(lastIndex, match.index), placeholders), ctx));
     }
     const m = match[0];
     if (m.startsWith('$$')) {
-      const latex = m.slice(2, -2).trim();
+      const latex = restoreDollar(m.slice(2, -2).trim(), placeholders);
       const omml = latexToOmml(latex, true);
-      // 用標記包圍，供 blockToWml 切分
       runs.push('\u0001DMATH\u0001' + omml + '\u0001ENDDMATH\u0001');
     } else {
-      const latex = m.slice(1, -1).trim();
+      const latex = restoreDollar(m.slice(1, -1).trim(), placeholders);
       const omml = latexToOmml(latex, false);
       runs.push(omml);
     }
     lastIndex = match.index + m.length;
   }
-  if (lastIndex < text.length) {
-    runs.push(makeTextRun(text.slice(lastIndex), ctx));
+  if (lastIndex < work.length) {
+    runs.push(makeTextRun(restoreDollar(work.slice(lastIndex), placeholders), ctx));
   }
   return runs.join('');
+}
+
+function restoreDollar(s, placeholders) {
+  let i = 0;
+  return s.replace(/\u0001DOLLAR\u0001/g, () => placeholders[i++] || '$');
 }
 
 function makeTextRun(text, ctx) {
@@ -1335,10 +1551,9 @@ function makeTextRun(text, ctx) {
   if (ctx.strike) props.push('<w:strike/>');
   if (ctx.superscript) props.push('<w:vertAlign w:val="superscript"/>');
   if (ctx.subscript) props.push('<w:vertAlign w:val="subscript"/>');
-  if (ctx.color) props.push('<w:color w:val="' + ctx.color.replace('#','') + '"/>');
+  if (ctx.color) props.push('<w:color w:val="' + ctx.color + '"/>');
   if (ctx.fontSize) props.push('<w:sz w:val="' + ctx.fontSize + '"/><w:szCs w:val="' + ctx.fontSize + '"/>');
   let rPr = props.length ? '<w:rPr>' + props.join('') + '</w:rPr>' : '';
-  // 處理文字內換行
   if (text.indexOf('\n') >= 0) {
     const segs = text.split('\n');
     let out = '';
@@ -1353,6 +1568,41 @@ function makeTextRun(text, ctx) {
 
 function escapeXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// 安全清洗：移除所有 <script>、<iframe>、on* 事件處理器，以及已知惡意網域引用
+function sanitizeHtmlForPreview(html) {
+  let s = String(html || '');
+  // 已知惡意網域清單（polyfill.io 系列及其他常見供應鏈攻擊網域）
+  const MALICIOUS_DOMAINS = [
+    'polyfill.io', 'www.polyfill.io', 'cdn.polyfill.io',
+    'bootcdn.net', 'staticfile.org', 'jsdelivr.net.cdn.cloudflare.net',
+    'unpkg.com.cdn.cloudflare.net'
+  ];
+  // 移除所有 <script src="..."> 外部引用（保留 MathJax 由我們自己注入）
+  s = s.replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*["'][^>]*>\s*<\/script>/gi, '');
+  // 移除所有 <script>...</script> 內聯腳本
+  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  // 移除 <iframe>、<object>、<embed>
+  s = s.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
+  s = s.replace(/<iframe\b[^>]*\/?>/gi, '');
+  s = s.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
+  s = s.replace(/<embed\b[^>]*>/gi, '');
+  // 移除所有 on* 事件處理器（onclick、onerror、onload 等）
+  s = s.replace(/\son\w+\s*=\s*"[^"]*"/gi, '');
+  s = s.replace(/\son\w+\s*=\s*'[^']*'/gi, '');
+  s = s.replace(/\son\w+\s*=\s*[^\s>]+/gi, '');
+  // 移除 javascript: 協定
+  s = s.replace(/(href|src)\s*=\s*["']javascript:[^"']*["']/gi, '$1="#"', s);
+  // 針對惡意網域的任何殘留引用（link、@import 等）移除整個標籤
+  for (const d of MALICIOUS_DOMAINS) {
+    const esc = d.replace(/\./g, '\\.');
+    // 移除含惡意網域的 <link> 標籤
+    s = s.replace(new RegExp('<link\\b[^>]*' + esc + '[^>]*>', 'gi'), '');
+    // 移除含惡意網域的 <style> 內 @import
+    s = s.replace(new RegExp('@import\\s+[^;]*' + esc + '[^;]*;?', 'gi'), '');
+  }
+  return s;
 }
 
 function tableToWml(node, ctx) {
