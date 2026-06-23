@@ -249,9 +249,8 @@
       <div class="form-group">
         <label>選擇 AI 模型</label>
         <select id="model">
-          <option value="qwen3.6-plus">qwen3.6-plus（通義千問 3.6 Plus）</option>
+          <option value="qwen3.6-plus" selected>qwen3.6-plus（通義千問 3.6 Plus）</option>
           <option value="glm-5.2-el">glm-5.2-el（智譜 GLM-5.2 EL）</option>
-          <option value="deepseek-v4-pro-el" selected>deepseek-v4-pro-el（DeepSeek V4 Pro EL）</option>
         </select>
         <div id="modelHint" class="model-hint"></div>
       </div>
@@ -785,10 +784,6 @@ const MODEL_HINTS = {
   'glm-5.2-el': {
     text: 'glm-5.2-el：智譜 GLM-5.2 EL 模型，推理能力強，適合數理、邏輯題目生成。',
     warning: false
-  },
-  'deepseek-v4-pro-el': {
-    text: 'deepseek-v4-pro-el：DeepSeek V4 Pro EL，深度推理與編碼能力出色，適合 ICT、人工智能、數學延伸等科目。',
-    warning: false
   }
 };
 
@@ -835,35 +830,60 @@ function setProgress(pct) {
 }
 
 // 提取文件文本
+// 問題 3 修正：回傳值可能為純字串或 {images:[dataUrl...], note:string}
 async function extractFileContent(file) {
   const ext = file.name.split('.').pop().toLowerCase();
-  
+
   if (ext === 'txt') {
     return await file.text();
   }
-  
+
+  // PDF：渲染為影像（避免 CJK CMap 缺漏造成的編碼亂碼）
   if (ext === 'pdf') {
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-    let text = '';
-    for (let i = 1; i <= pdf.numPages; i++) {
+    const pdf = await pdfjsLib.getDocument({
+      data: arrayBuffer,
+      cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+      cMapPacked: true
+    }).promise;
+    const maxPages = Math.min(pdf.numPages, 8);
+    const images = [];
+    for (let i = 1; i <= maxPages; i++) {
       const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      text += content.items.map(it => it.str).join(' ') + '\n';
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+      images.push(canvas.toDataURL('image/png'));
     }
-    return text;
+    if (pdf.numPages > maxPages) {
+      log(`  ⚠️ PDF 共 ${pdf.numPages} 頁，僅轉換前 ${maxPages} 頁為影像`, 'thinking');
+    }
+    return { images: images, note: `[PDF 影像: ${file.name}，共 ${maxPages} 頁]` };
   }
-  
+
+  // DOCX：保留純文字（mammoth 已正確處理 Unicode 編碼）
   if (ext === 'docx') {
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({arrayBuffer});
     return result.value;
   }
-  
+
+  // DOC（舊格式）：瀏覽器無可靠解析庫，僅以 UTF-8 讀取純文字
+  if (ext === 'doc') {
+    try {
+      return await file.text();
+    } catch (e) {
+      return `[無法讀取 DOC 檔案: ${file.name}]`;
+    }
+  }
+
   if (['png','jpg','jpeg'].includes(ext)) {
     return `[圖片檔案: ${file.name}]`;
   }
-  
+
   return '';
 }
 
@@ -893,33 +913,50 @@ async function generateWorksheet() {
     log('Model 提醒：' + modelHint.text, modelHint.warning ? 'thinking' : 'info');
     setProgress(5);
 
-    // 讀取參考文件
+    // 讀取參考文件（可能含影像）
     let refContent = '';
+    let refImages = [];
     const refFiles = document.getElementById('refFiles').files;
     if (refFiles.length > 0) {
       log(`📚 正在讀取 ${refFiles.length} 個參考教材...`, 'step');
       for (const f of refFiles) {
         log(`  · 解析 ${f.name}`, 'info');
-        const txt = await extractFileContent(f);
-        refContent += `\n\n=== ${f.name} ===\n${txt.substring(0, 8000)}`;
+        const result = await extractFileContent(f);
+        if (result && typeof result === 'object' && Array.isArray(result.images)) {
+          refContent += `\n\n=== ${f.name} ===\n${result.note || ''}`;
+          refImages.push(...result.images);
+          log(`    ↳ 轉為 ${result.images.length} 張影像`, 'info');
+        } else if (typeof result === 'string') {
+          refContent += `\n\n=== ${f.name} ===\n${result.substring(0, 8000)}`;
+        }
       }
       log('✓ 參考教材讀取完成', 'success');
     }
     setProgress(20);
 
-    // 讀取格式參考
+    // 讀取格式參考（可能含影像）
     let formatContent = '';
+    let formatImages = [];
     const formatFiles = document.getElementById('formatFiles').files;
     if (formatFiles.length > 0) {
       log(`📄 正在讀取 ${formatFiles.length} 個格式參考...`, 'step');
       for (const f of formatFiles) {
         log(`  · 解析 ${f.name}`, 'info');
-        const txt = await extractFileContent(f);
-        formatContent += `\n\n=== ${f.name} ===\n${txt.substring(0, 6000)}`;
+        const result = await extractFileContent(f);
+        if (result && typeof result === 'object' && Array.isArray(result.images)) {
+          formatContent += `\n\n=== ${f.name} ===\n${result.note || ''}`;
+          formatImages.push(...result.images);
+          log(`    ↳ 轉為 ${result.images.length} 張影像`, 'info');
+        } else if (typeof result === 'string') {
+          formatContent += `\n\n=== ${f.name} ===\n${result.substring(0, 6000)}`;
+        }
       }
       log('✓ 格式參考讀取完成', 'success');
     }
     setProgress(35);
+
+    // 影像合併（參考教材 + 格式參考）
+    const allImages = [...refImages, ...formatImages];
 
     // 建立 prompt
     const isMathSubject = MATH_SUBJECTS.includes(subject);
@@ -977,6 +1014,21 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     log('🧠 連接 Poe API (' + model + ')...', 'step');
     setProgress(45);
 
+    // 問題 3 修正：有影像時使用多模態格式送出
+    let userMessage;
+    if (allImages.length > 0) {
+      log(`🖼️ 攜帶 ${allImages.length} 張參考影像，使用多模態格式送出`, 'info');
+      userMessage = {
+        role: 'user',
+        content: [
+          { type: 'text', text: userPrompt },
+          ...allImages.map(url => ({ type: 'image_url', image_url: { url: url } }))
+        ]
+      };
+    } else {
+      userMessage = { role: 'user', content: userPrompt };
+    }
+
     const maxRetries = 5;
     let response;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -990,7 +1042,7 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
           model: model,
           messages: [
             {role: 'system', content: systemPrompt},
-            {role: 'user', content: userPrompt}
+            userMessage
           ],
           stream: true
         })
@@ -1043,6 +1095,22 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
             }
           } catch(e) {}
         }
+      }
+    }
+
+    // 問題 1 修正：flush 殘留的 decoder 與未完整行 buffer
+    buffer += decoder.decode();
+    if (buffer.startsWith('data: ')) {
+      const data = buffer.slice(6).trim();
+      if (data && data !== '[DONE]') {
+        try {
+          const json = JSON.parse(data);
+          const delta = json.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            fullContent += delta;
+            charCount += delta.length;
+          }
+        } catch(e) {}
       }
     }
 
@@ -1445,10 +1513,11 @@ function blockToDocxParagraph(node, ctx, tag) {
   if (cssProps['font-weight'] && /bold|[6-9]00/i.test(cssProps['font-weight'])) {
     childCtx.bold = true;
   }
-  if (cssProps['color']) {
-    const hex = cssColorToHex(cssProps['color']);
-    if (hex) childCtx.color = hex;
-  }
+  // 問題 2 修正：忽略 CSS color，避免 DOCX 出現多種顏色
+  // if (cssProps['color']) {
+  //   const hex = cssColorToHex(cssProps['color']);
+  //   if (hex) childCtx.color = hex;
+  // }
   if (cssProps['font-style'] && /italic/i.test(cssProps['font-style'])) {
     childCtx.italic = true;
   }
@@ -1554,10 +1623,11 @@ function inlineElementToDocxRuns(node, ctx) {
   if (tag === 'u') elCtx.underline = true;
   if (tag === 'sub') elCtx.subscript = true;
   if (tag === 'sup') elCtx.superscript = true;
-  if (cssProps['color']) {
-    const hex = cssColorToHex(cssProps['color']);
-    if (hex) elCtx.color = hex;
-  }
+  // 問題 2 修正：忽略 CSS color
+  // if (cssProps['color']) {
+  //   const hex = cssColorToHex(cssProps['color']);
+  //   if (hex) elCtx.color = hex;
+  // }
   if (cssProps['font-size']) {
     const hp = cssSizeToHalfPt(cssProps['font-size']);
     if (hp) elCtx.fontSize = hp;
@@ -2021,6 +2091,13 @@ function fixDisplayMathInFlowingText(html) {
 // 安全清洗：移除所有 <script>、<iframe>、on* 事件處理器，以及已知惡意網域引用
 function sanitizeHtmlForPreview(html) {
   let s = String(html || '');
+  // 問題 4 修正：將可換行的空格實體改為不換行空格，避免在數學式或符號間斷行
+  s = s.replace(/&ensp;/gi, '&nbsp;')
+       .replace(/&emsp;/gi, '&nbsp;&nbsp;')
+       .replace(/&thinsp;/gi, '&nbsp;')
+       .replace(/&#8194;/gi, '&nbsp;')
+       .replace(/&#8195;/gi, '&nbsp;&nbsp;')
+       .replace(/&#8201;/gi, '&nbsp;');
   // 已知惡意網域清單（polyfill.io 系列及其他常見供應鏈攻擊網域）
   const MALICIOUS_DOMAINS = [
     'polyfill.io', 'www.polyfill.io', 'cdn.polyfill.io',
