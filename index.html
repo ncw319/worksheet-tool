@@ -110,9 +110,9 @@
     height: 100%; background: linear-gradient(90deg, #2a5298, #c41e3a);
     width: 0%; transition: width 0.3s;
   }
-  .download-buttons { display: flex; gap: 10px; margin-top: 12px; }
+  .download-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
   .download-buttons button {
-    flex: 1; padding: 10px; border: 2px solid #2a5298;
+    flex: 1 1 calc(33% - 10px); min-width: 120px; padding: 10px; border: 2px solid #2a5298;
     background: white; color: #2a5298; border-radius: 8px;
     cursor: pointer; font-weight: 600;
   }
@@ -466,8 +466,8 @@
         <label>輸出格式</label>
         <div class="radio-group">
           <label>
-            <input type="radio" name="format" value="docx" checked>
-            <span>📘 DOCX (Word，含原生方程式)</span>
+            <input type="radio" name="format" value="html" checked>
+            <span>🌐 HTML（含樣式，可直接列印或另存）</span>
           </label>
         </div>
       </div>
@@ -491,9 +491,11 @@
       </div>
 
       <div class="download-buttons" id="downloadButtons" style="display:none;">
-        <button onclick="downloadOutput()">💾 下載 DOCX (含原生方程式)</button>
-        <button onclick="copyOutput()">📋 複製 HTML 原始碼</button>
-        <button onclick="printOutput()">🖨️ 列印 HTML</button>
+        <button onclick="downloadHtml()">💾 下載 HTML 文件</button>
+        <button onclick="downloadDocxFromHtml()">📄 轉為 DOCX</button>
+        <button onclick="copyOutput()">📋 複製 HTML</button>
+        <button onclick="copyAllOutput()">📋 複製所有輸出</button>
+        <button onclick="printOutput()">🖨️ 列印</button>
       </div>
     </div>
   </div>
@@ -773,7 +775,7 @@ if (document.readyState === 'loading') {
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 let generatedContent = '';
-let outputFormat = 'docx';
+let outputFormat = 'html';
 
 const MODEL_HINTS = {
   'qwen3.6-plus': {
@@ -925,12 +927,16 @@ async function generateWorksheet() {
 【數學公式格式 — 非常重要】
 8. 所有數學公式、化學方程式、物理符號必須使用 LaTeX 語法：
    - 行內公式用單一美元符號包圍：$x^2 + y^2 = r^2$、$\\frac{a}{b}$、$\\sqrt{2}$
-   - 獨立顯示公式用雙美元符號包圍：
+   - 獨立顯示公式用雙美元符號包圍（只用於需要居中呈現的主要方程式）：
      $$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$
    - 常見用法：上下標 $x^{n}$、$a_{i}$；分式 $\\frac{分子}{分母}$；根號 $\\sqrt[n]{x}$；希臘字母 $\\alpha \\beta \\gamma \\pi \\theta$；不等號 $\\leq \\geq \\neq$；求和 $\\sum_{i=1}^{n}$；極限 $\\lim_{x \\to 0}$；矩陣 $\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}$
    - 單位、變數、簡單符號也用 LaTeX：$\\text{m/s}$、$v = u + at$、$\\Delta E = mc^2$
 9. 不要用 Unicode 數學符號（如 ² ³ √ ∫ ∑）替代 LaTeX；不要用 OMML 或 MathML
-10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫` : `
+10. LaTeX 之外的文字仍用繁體中文，公式必須用 $...$ 標記，不可裸寫
+11. 【行內 vs 顯示公式選擇 — 極重要】：
+    - 句子中間的數值條件、代入值、變數值（如「當 x = 3 時」「代入 y = -2」）必須用行內公式 $x=3$、$y=-2$，絕對不能用 $$...$$
+    - $$...$$ 只用於獨立展示的主方程式或推導步驟，前後各有完整換行
+    - 絕對不可把一個連貫句子（如「求多項式在 x=3 且 y=-2 時的值」）拆成多個 <p> 段落再在中間插入 $$...$$；應寫成單一 <p>：「求該多項式在 $x=3$ 且 $y=-2$ 時的值。」` : `
 【符號與公式格式】
 8. 直接使用 Unicode 符號書寫，不要使用 LaTeX、不要用 $...$ 包圍：
    - 上標用 Unicode：x²、x³、xⁿ（或用 HTML <sup> 標籤）
@@ -1073,7 +1079,8 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
       htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:"Times New Roman","新細明體",serif;padding:30px;line-height:1.8;}</style></head><body>${htmlContent}</body></html>`;
     }
 
-    // 安全清洗：移除所有外部 script 與已知惡意網域引用
+    // 修正 display math 誤用：AI 常將句子中的變數/條件寫成 $$...$$ 導致句子碎裂
+    htmlContent = fixDisplayMathInFlowingText(htmlContent);
     htmlContent = sanitizeHtmlForPreview(htmlContent);
     generatedContent = htmlContent;
 
@@ -1108,8 +1115,8 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     idoc.close();
 
     log(isMathSubjectNow
-      ? '✅ 完成！點擊「下載文件」即可生成含 Word 原生方程式的 DOCX'
-      : '✅ 完成！點擊「下載文件」即可生成 DOCX', 'success');
+      ? '✅ 完成！可下載 HTML 文件，或點擊「轉為 DOCX」生成含 Word 原生方程式的 DOCX'
+      : '✅ 完成！可下載 HTML 文件，或點擊「轉為 DOCX」轉換格式', 'success');
     setProgress(100);
     document.getElementById('downloadButtons').style.display = 'flex';
 
@@ -1123,6 +1130,36 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
 }
 
 function downloadOutput() {
+  if (!generatedContent) return;
+  downloadHtml();
+}
+
+function downloadHtml() {
+  if (!generatedContent) return;
+  const grade = document.getElementById('grade').value;
+  const subject = document.getElementById('subject').value;
+  const topic = document.getElementById('topic').value;
+  const filename = `${grade}_${subject}_${topic}_工作紙.html`;
+
+  // 數學類科目：注入 MathJax，使下載的 HTML 在瀏覽器打開時能正確渲染公式
+  let htmlToSave = generatedContent;
+  if (MATH_SUBJECTS.includes(subject)) {
+    const mathjaxSnippet =
+      '<script>window.MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]], displayMath: [["$$","$$"],["\\\\[","\\\\]"]] }, svg: { fontCache: "global" } };<\/script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"><\/script>';
+    if (/<\/head>/i.test(htmlToSave)) {
+      htmlToSave = htmlToSave.replace(/<\/head>/i, mathjaxSnippet + '</head>');
+    } else {
+      htmlToSave = mathjaxSnippet + htmlToSave;
+    }
+  }
+
+  const blob = new Blob([htmlToSave], {type: 'text/html;charset=utf-8'});
+  saveAs(blob, filename);
+  log('💾 已下載 HTML 文件：' + filename, 'success');
+}
+
+function downloadDocxFromHtml() {
   if (!generatedContent) return;
   const grade = document.getElementById('grade').value;
   const subject = document.getElementById('subject').value;
@@ -1785,14 +1822,26 @@ function tableToDocx(node, ctx) {
     const cells = [];
     for (const td of Array.from(tr.querySelectorAll('td, th'))) {
       const cellChildren = [];
+      let cellRunsBuf = [];
+      const flushCellRuns = () => {
+        if (cellRunsBuf.length) {
+          cellChildren.push(new Paragraph({ children: cellRunsBuf }));
+          cellRunsBuf = [];
+        }
+      };
       for (const child of Array.from(td.childNodes)) {
         const items = nodeToDocx(child, ctx);
-        if (Array.isArray(items)) {
-          for (const it of items) { if (it) cellChildren.push(it); }
-        } else if (items) {
-          cellChildren.push(items);
+        const arr = Array.isArray(items) ? items.filter(Boolean) : (items ? [items] : []);
+        for (const it of arr) {
+          if (it instanceof Paragraph || it instanceof Table) {
+            flushCellRuns();
+            cellChildren.push(it);
+          } else {
+            cellRunsBuf.push(it);
+          }
         }
       }
+      flushCellRuns();
       if (cellChildren.length === 0) {
         cellChildren.push(new Paragraph({}));
       }
@@ -1816,27 +1865,37 @@ function tableToDocx(node, ctx) {
 // 列表 → Paragraph 陣列
 function listToDocx(node, ctx, tag) {
   const lib = D();
-  const { Paragraph, TextRun } = lib;
+  const { Paragraph, TextRun, Table } = lib;
   const paragraphs = [];
   const isOrdered = tag === 'ol';
   let idx = 1;
   for (const li of Array.from(node.querySelectorAll(':scope > li'))) {
-    const runs = [];
     const prefix = isOrdered ? (idx + '. ') : '• ';
-    runs.push(new TextRun({ text: prefix, bold: true }));
+    let liRuns = [new TextRun({ text: prefix, bold: true })];
     for (const child of Array.from(li.childNodes)) {
-      const childRuns = nodeToDocx(child, ctx);
-      if (Array.isArray(childRuns)) {
-        for (const r of childRuns) { if (r) runs.push(r); }
-      } else if (childRuns) {
-        runs.push(childRuns);
+      const items = nodeToDocx(child, ctx);
+      const arr = Array.isArray(items) ? items.filter(Boolean) : (items ? [items] : []);
+      for (const it of arr) {
+        if (it instanceof Paragraph || it instanceof Table) {
+          paragraphs.push(new Paragraph({
+            spacing: { after: 60 },
+            indent: { left: 480, hanging: 360 },
+            children: liRuns,
+          }));
+          liRuns = [];
+          paragraphs.push(it);
+        } else {
+          liRuns.push(it);
+        }
       }
     }
-    paragraphs.push(new Paragraph({
-      spacing: { after: 60 },
-      indent: { left: 480, hanging: 360 },
-      children: runs,
-    }));
+    if (liRuns.length) {
+      paragraphs.push(new Paragraph({
+        spacing: { after: 60 },
+        indent: { left: 480, hanging: 360 },
+        children: liRuns,
+      }));
+    }
     idx++;
   }
   return paragraphs;
@@ -1951,6 +2010,14 @@ function cssLenToTwip(v) {
   return Math.round(n * 20);
 }
 
+// 修正 display math 誤用：當 $$...$$ 出現在含其他文字的節點中，自動降級為行內 $...$
+// 將所有 $$...$$ 轉為 $...$ 行內公式。
+// 根本原因：AI 常把行文中的變數/條件寫成 $$...$$，導致句子碎裂成多個段落。
+// 工作紙不需要 LaTeX display mode — 由段落的 text-align 決定視覺居中即可。
+function fixDisplayMathInFlowingText(html) {
+  return html.replace(/\$\$([\s\S]+?)\$\$/g, (m, inner) => '$' + inner.trim() + '$');
+}
+
 // 安全清洗：移除所有 <script>、<iframe>、on* 事件處理器，以及已知惡意網域引用
 function sanitizeHtmlForPreview(html) {
   let s = String(html || '');
@@ -1989,6 +2056,21 @@ function sanitizeHtmlForPreview(html) {
 function copyOutput() {
   navigator.clipboard.writeText(generatedContent).then(() => {
     log('📋 已複製到剪貼簿', 'success');
+  });
+}
+
+function copyAllOutput() {
+  if (!generatedContent) {
+    log('❌ 尚無內容可複製', 'error');
+    return;
+  }
+  const tmp = document.createElement('div');
+  tmp.innerHTML = generatedContent;
+  const plainText = (tmp.innerText || tmp.textContent || '').trim();
+  navigator.clipboard.writeText(plainText).then(() => {
+    log('📋 已複製工作紙純文字至剪貼簿', 'success');
+  }).catch(err => {
+    log('❌ 複製失敗：' + err.message, 'error');
   });
 }
 
