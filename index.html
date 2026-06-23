@@ -250,7 +250,7 @@
         <label>選擇 AI 模型</label>
         <select id="model">
           <option value="qwen3.6-plus" selected>qwen3.6-plus（通義千問 3.6 Plus）</option>
-          <option value="glm-5.2-el">glm-5.2-el（智譜 GLM-5.2 EL）</option>
+          <option value="gemini-3.5-flash">gemini-3.5-flash（Google Gemini 3.5 Flash）</option>
         </select>
         <div id="modelHint" class="model-hint"></div>
       </div>
@@ -781,8 +781,8 @@ const MODEL_HINTS = {
     text: 'qwen3.6-plus：阿里巴巴通義千問 3.6 Plus，擅長中文理解與生成，適合語文、人文科目工作紙。',
     warning: false
   },
-  'glm-5.2-el': {
-    text: 'glm-5.2-el：智譜 GLM-5.2 EL 模型，推理能力強，適合數理、邏輯題目生成。',
+  'gemini-3.5-flash': {
+    text: 'gemini-3.5-flash：Google Gemini 3.5 Flash，支援視覺與多模態，反應快、適合一般工作紙。',
     warning: false
   }
 };
@@ -973,7 +973,10 @@ async function generateWorksheet() {
 11. 【行內 vs 顯示公式選擇 — 極重要】：
     - 句子中間的數值條件、代入值、變數值（如「當 x = 3 時」「代入 y = -2」）必須用行內公式 $x=3$、$y=-2$，絕對不能用 $$...$$
     - $$...$$ 只用於獨立展示的主方程式或推導步驟，前後各有完整換行
-    - 絕對不可把一個連貫句子（如「求多項式在 x=3 且 y=-2 時的值」）拆成多個 <p> 段落再在中間插入 $$...$$；應寫成單一 <p>：「求該多項式在 $x=3$ 且 $y=-2$ 時的值。」` : `
+    - 絕對不可把一個連貫句子拆成多個 block 元素（<div>、<p>），包含但不限於：
+      ✗ <div>考慮多項式</div><div>$2x^3-4x^2y+6xy^2-3y^3+5$</div><div>。</div>
+      ✓ <div>考慮多項式 $2x^3-4x^2y+6xy^2-3y^3+5$。</div>
+    - 同一条题目/子题目的全部文字与公式必须放在同一个 <div>（或 <div class="sub-question">）中，绝不可拆成多个 <div>` : `
 【符號與公式格式】
 8. 直接使用 Unicode 符號書寫，不要使用 LaTeX、不要用 $...$ 包圍：
    - 上標用 Unicode：x²、x³、xⁿ（或用 HTML <sup> 標籤）
@@ -996,7 +999,8 @@ async function generateWorksheet() {
 ${mathPromptBlock}
 11. 嚴禁在 HTML 中引用任何外部 JavaScript 函式庫或 CDN（包括但不限於 polyfill.io、cdn.jsdelivr.net、unpkg.com、cdnjs 等）；所有 <script> 標籤一律不要輸出，公式渲染由系統自動處理
 12. 嚴禁使用 <iframe>、<object>、<embed> 等嵌入標籤，嚴禁使用 on* 事件處理器（onclick、onload 等）
-13. 輸出的 HTML 中絕對不要包含 <\/script> 字串，所有腳本標籤一律省略`;
+13. 輸出的 HTML 中絕對不要包含 <\/script> 字串，所有腳本標籤一律省略
+14. 【禁止附帶來源／參考資料】：嚴禁在 HTML 之後輸出任何「Sources:」「References」「參考資料」等章節或链接列表；輸出以 </html> 結束，之後不要加任何文字`;
 
     const userPrompt = `請為以下要求生成工作紙：
 
@@ -1143,6 +1147,9 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     }
     // 移除 ```html 或 ``` 的殘留標記
     htmlContent = htmlContent.replace(/```html/gi, '').replace(/```/g, '');
+    // 移除 AI 模型自動附加的「Sources:」參考來源章節（qwen/gemini 常見行為）
+    htmlContent = htmlContent.replace(/\n?\s*-{2,}\s*\n\*\*Sources[:：]\*\*[\s\S]*$/gi, '');
+    htmlContent = htmlContent.replace(/\*\*Sources[:：]\*\*[\s\S]*$/gi, '');
     if (!htmlContent.includes('<!DOCTYPE') && !htmlContent.includes('<html')) {
       htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:"Times New Roman","新細明體",serif;padding:30px;line-height:1.8;}</style></head><body>${htmlContent}</body></html>`;
     }
@@ -1155,7 +1162,7 @@ ${formatContent ? '【格式參考（請仿照排版風格）】' + formatConten
     // 預覽（已清洗外部 script，僅保留 MathJax 注入）
     const preview = document.getElementById('previewArea');
     const iframe = document.createElement('iframe');
-    iframe.style.cssText = 'width:100%;height:680px;border:none;';
+    iframe.style.cssText = 'width:100%;aspect-ratio:210/297;height:auto;max-height:90vh;border:none;box-shadow:0 2px 12px rgba(0,0,0,0.15);';
     preview.innerHTML = '';
     preview.appendChild(iframe);
     const idoc = iframe.contentDocument;
@@ -2098,6 +2105,37 @@ function sanitizeHtmlForPreview(html) {
        .replace(/&#8194;/gi, '&nbsp;')
        .replace(/&#8195;/gi, '&nbsp;&nbsp;')
        .replace(/&#8201;/gi, '&nbsp;');
+  // 問題 4 延伸：中文與 $...$ 數學公式之間的空格改為不換行，避免公式被擠到下一行
+  // 處理「中文 $...$」前的空格
+  s = s.replace(/([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+(\$)/g, '$1&nbsp;$2');
+  // 問題 4 延伸 3：「N. 中文」(題號後的空格) 改為不換行，避免題號與題目斷開
+  s = s.replace(/(\d+\.)\s+([\u4e00-\u9fff])/g, '$1&nbsp;$2');
+  // 問題 4 延伸 3：「(a) 中文」「(1) 中文」(子題標籤後的空格) 改為不換行
+  s = s.replace(/(\([a-zA-Z0-9]+\))\s+([\u4e00-\u9fff])/g, '$1&nbsp;$2');
+  // 問題 4 延伸 3：中文與「(」之間的空格改為不換行
+  s = s.replace(/([\u4e00-\u9fff])\s+(\()/g, '$1&nbsp;$2');
+  // 處理「$...$」後接中文的空格
+  s = s.replace(/(\$)\s+([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])/g, '$1&nbsp;$2');
+  // 問題 4 延伸：分數括號內「（N 分）」的空格改為不換行
+  s = s.replace(/（\s*(\d+)\s+分\s*/g, '（$1&nbsp;分');
+  // 問題 4 延伸 2：移除標籤之間的純格式化空白（換行+縮排），避免被當成斷行點
+  s = s.replace(/>\s+</g, '><');
+  // 問題 4 延伸 2：</span> 與後續文字之間的空白改為不換行空格
+  s = s.replace(/(<\/span>)\s+([^\s<])/g, '$1&nbsp;$2');
+  // 問題 4 延伸 2：文字與閉合區塊標籤之間的尾隨空白移除
+  s = s.replace(/([^\s>])\s+(<\/(?:div|span|p|li|h[1-6])>)/g, '$1$2');
+  // 問題 4 延伸 2：<span> 等行內標籤後緊接中文時，標籤內容後的空白也改為不換行
+  s = s.replace(/(<span[^>]*>[^<]*<\/span>)\s+([\u4e00-\u9fff])/g, '$1&nbsp;$2');
+  // 問題 5 修正：mjx-container 一律強制行內，禁止任何情況下的 block 顯示
+  // （不再嘗試 div→span 轉換：會產生 ">" 殘留字元，且對 block 父容器無實質幫助）
+  const antiBreakCss = '<style>.marks{display:inline !important;float:none !important;white-space:nowrap !important;}.answer-space-sm,.answer-space-md,.answer-space-lg{page-break-inside:avoid;}.sub-question,.question,.question-number,.sub-label{page-break-inside:avoid;word-break:keep-all !important;line-break:strict !important;}mjx-container{white-space:nowrap !important;display:inline !important;vertical-align:baseline !important;margin:0 !important;padding:0 !important;}mjx-container[display="true"]{display:inline !important;text-align:inherit !important;margin:0 !important;padding:0 !important;}</style>';
+  if (/<\/head>/i.test(s)) {
+    s = s.replace(/<\/head>/i, antiBreakCss + '</head>');
+  } else if (/<body[^>]*>/i.test(s)) {
+    s = s.replace(/<body[^>]*>/i, m => m + antiBreakCss);
+  } else {
+    s = antiBreakCss + s;
+  }
   // 已知惡意網域清單（polyfill.io 系列及其他常見供應鏈攻擊網域）
   const MALICIOUS_DOMAINS = [
     'polyfill.io', 'www.polyfill.io', 'cdn.polyfill.io',
